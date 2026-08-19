@@ -1,0 +1,846 @@
+#!/usr/bin/env node
+/**
+ * ===========================================================================
+ *  وارد کردن محتوای واقعی از CSV به دیتابیس گالری
+ * ===========================================================================
+ *
+ *  چرا اسکریپت جدا و نه SQL؟ چون CSV نیاز به اعتبارسنجی ردیف‌به‌ردیف دارد و
+ *  ردیف خراب باید رد شود، نه اینکه کل import را بخواباند.
+ *
+ *  عمداً هیچ پکیجی نصب نمی‌کند: پارسر CSV و خواندن .env.local اینجا نوشته
+ *  شده‌اند و تنها وابستگی، `pg` است که از قبل در پروژه هست.
+ *
+ *  --------------------------------------------------------------------------
+ *  اجرا (سه مرحله، به همین ترتیب)
+ *  --------------------------------------------------------------------------
+ *    ۱) پیش‌نمایش ۵ ردیف اول — به دیتابیس دست نمی‌زند و حتی به آن وصل نمی‌شود:
+ *         node scripts/import-content.mjs --dry-run --limit=5
+ *
+ *    ۲) وارد کردن واقعی همان ۵ ردیف، با پاک‌کردن داده‌های placeholder قبلی:
+ *         node scripts/import-content.mjs --reset --limit=5
+ *
+ *    ۳) وارد کردن کل فایل (باز هم با --reset تا ۵ ردیف مرحله ۲ دوباره نیاید):
+ *         node scripts/import-content.mjs --reset
+ *
+ *  --------------------------------------------------------------------------
+ *  گزینه‌ها
+ *  --------------------------------------------------------------------------
+ *    --file=PATH        مسیر CSV (پیش‌فرض: ./prompts_index_with_titles_2.csv)
+ *    --limit=N          فقط N ردیف اول
+ *    --dry-run          فقط اعتبارسنجی و گزارش؛ هیچ نوشتنی در دیتابیس
+ *    --reset            پاک‌کردن categories/images/prompts/image_categories
+ *                       پیش از وارد کردن (داده‌های تستی placeholder را می‌برد)
+ *    --model="NAME"     مقدار images.model_used — این CSV ستون مدل ندارد، پس
+ *                       بدون این گزینه NULL می‌ماند
+ *    --url-prefix=P     پیشوند آدرس تصویر (پیش‌فرض: /gallery/)
+ *    --skipped=PATH     مسیر لاگ ردیف‌های ردشده (پیش‌فرض: ./skipped-rows.csv)
+ * ===========================================================================
+ */
+
+import { readFile, writeFile, open } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+/** گیومه‌های دور مقدار آرگومان را برمی‌دارد (ویندوز اغلب نگهشان می‌دارد). */
+const stripQuotes = (s) => s.replace(/^["']|["']$/g, "");
+
+// ---------------------------------------------------------------------------
+// تاکسونومی — تنها منبع حقیقتِ نگاشت «نام فارسی → slug»
+// ---------------------------------------------------------------------------
+// ترتیب این آرایه = ترتیب id در جدول categories = ترتیب تب‌ها در سایت
+// (getCategories با ORDER BY c.id می‌خواند). بر اساس حجم محتوا مرتب شده و
+// «سایر» آخر است.
+//
+// slug باید با قید دیتابیس بخواند: ^[a-z0-9]+(-[a-z0-9]+)*$
+//
+// نام‌های فارسی را دست‌نخورده و با همان نگارشِ فایل CSV می‌نویسیم؛ تطبیق از
+// طریق normalizeFa انجام می‌شود، پس نیم‌فاصله و ی/ک عربی مشکلی ایجاد نمی‌کند.
+const TAXONOMY = [
+  { slug: "portrait", name_fa: "پرتره / سلفی" },
+  { slug: "fashion", name_fa: "مد و فشن (ادیتوریال)" },
+  { slug: "product", name_fa: "محصول / لایف‌استایل" },
+  { slug: "beach", name_fa: "دریا / ساحل" },
+  { slug: "couple", name_fa: "زوج / عاشقانه" },
+  { slug: "nature", name_fa: "منظره / طبیعت" },
+  { slug: "architecture", name_fa: "معماری / فضای داخلی" },
+  { slug: "neon", name_fa: "شب / نئون / سینمایی" },
+  { slug: "animals", name_fa: "حیوانات" },
+  { slug: "group", name_fa: "گروهی / دوستان" },
+  { slug: "other", name_fa: "سایر" },
+];
+
+// نام ستون‌های موردانتظار. تطبیق با نام انجام می‌شود و اگر پیدا نشد، به همین
+// شماره ستون برمی‌گردیم (پس تغییر نام هدر، اسکریپت را نمی‌شکند).
+const COLUMNS = {
+  row: { name: "ردیف", fallbackIndex: 0 },
+  link: { name: "تصویر", fallbackIndex: 1 },
+  date: { name: "تاریخ", fallbackIndex: 2 },
+  cats: { name: "دسته‌بندی‌ها", fallbackIndex: 3 },
+  prompt: { name: "متن پرامپت", fallbackIndex: 4 },
+  file: { name: "نام فایل تصویر", fallbackIndex: 5 },
+  title: { name: "عنوان تصویر", fallbackIndex: 6 },
+};
+
+// ---------------------------------------------------------------------------
+// ابزارهای متن
+// ---------------------------------------------------------------------------
+
+/**
+ * یکسان‌سازی متن فارسی برای «تطبیق» (نه برای ذخیره‌سازی).
+ *
+ * چرا لازم است: یک نام مثل «محصول / لایف‌استایل» ممکن است با نیم‌فاصله یا
+ * بدون آن، با ی فارسی یا ي عربی، یا با فاصله‌های اضافه نوشته شود. بدون این
+ * تابع، ردیف‌های سالم به‌اشتباه «دسته‌بندی نامعتبر» شناخته می‌شدند.
+ */
+function normalizeFa(value) {
+  return String(value ?? "")
+    // نویسه‌های نامرئی: ZWSP، نیم‌فاصله (U+200C)، ZWJ، علامت‌های جهت‌نما، BOM.
+    // با \u نوشته شده‌اند نه خودِ نویسه، چون نویسه‌ی نامرئی در سورس عملاً
+    // غیرقابل‌بازبینی است و با کپی‌پیست از بین می‌رود.
+    .replace(/[​-‏‪-‮﻿]/g, "")
+    .replace(/ي/g, "ی") // ي عربی → ی فارسی
+    .replace(/ك/g, "ک") // ك عربی → ک فارسی
+    .replace(/ة/g, "ه") // ة → ه
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660)) // ٠١٢ → 012
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0)) // ۰۱۲ → 012
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+const isBlank = (v) => String(v ?? "").trim() === "";
+
+/**
+ * تاریخ ستون «تاریخ» را به Date تبدیل می‌کند.
+ *
+ * فرمت فایل: «05.07.2026 17:43:15» یعنی روز.ماه.سال — نه ماه.روز.سال.
+ * چرا دستی پارس می‌کنیم و نه new Date(str)؟ چون موتور جاوااسکریپت این فرمت را
+ * غیراستاندارد می‌داند و ممکن است روز و ماه را جابه‌جا تفسیر کند یا NaN بدهد.
+ * تفسیر اشتباه، خطای بی‌صدا می‌سازد: تاریخ‌ها معتبر به‌نظر می‌رسند ولی ترتیب
+ * گالری غلط می‌شود.
+ *
+ * ساعت به‌عنوان وقت محلی خوانده می‌شود (همان منطقه‌ای که محتوا تولید شده).
+ * اگر رشته خالی یا نامعتبر بود null برمی‌گردد تا صداکننده fallback بزند.
+ */
+function parseRowDate(value) {
+  const text = String(value ?? "").trim();
+  if (text === "") return null;
+
+  const m = text.match(
+    /^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})(?:[ T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
+  );
+  if (!m) return null;
+
+  const [, d, mo, y, hh = "0", mi = "0", ss = "0"] = m;
+  const day = Number(d);
+  const month = Number(mo);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  const dt = new Date(Number(y), month - 1, day, Number(hh), Number(mi), Number(ss));
+  // نگهبان سرریز: مثلاً ۳۱.۰۲ را جاوااسکریپت بی‌صدا به ۳ مارس می‌برد.
+  if (dt.getFullYear() !== Number(y) || dt.getMonth() !== month - 1 || dt.getDate() !== day) {
+    return null;
+  }
+  return dt;
+}
+
+/**
+ * پارسر CSV بر پایه RFC 4180 — بدون وابستگی.
+ *
+ * چرا پارسر دستی و نه split(",")؟ متن پرامپت‌ها هم کاما دارد، هم گیومه، و هم
+ * خط جدید داخل فیلد نقل‌قول‌شده. split ساده داده را نابود می‌کرد.
+ */
+function parseCsv(input) {
+  let text = String(input);
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1); // BOM
+
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  let i = 0;
+
+  while (i < text.length) {
+    const ch = text[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"'; // گیومه‌ی escape شده
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i += 1;
+        continue;
+      }
+      // خط جدید داخل فیلد حفظ می‌شود، ولی CRLF به LF یکسان می‌شود تا متنِ
+      // ذخیره‌شده در دیتابیس به سیستم‌عاملِ سازنده‌ی فایل وابسته نباشد.
+      if (ch === "\r") {
+        if (text[i + 1] === "\n") {
+          field += "\n";
+          i += 2;
+          continue;
+        }
+        field += "\n";
+        i += 1;
+        continue;
+      }
+      field += ch;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '"') {
+      inQuotes = true;
+      i += 1;
+      continue;
+    }
+    if (ch === ",") {
+      row.push(field);
+      field = "";
+      i += 1;
+      continue;
+    }
+    if (ch === "\r") {
+      i += 1; // بخشی از CRLF بیرون از گیومه — نادیده
+      continue;
+    }
+    if (ch === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+      i += 1;
+      continue;
+    }
+    field += ch;
+    i += 1;
+  }
+
+  // آخرین ردیف اگر فایل با خط جدید تمام نشده باشد
+  if (field !== "" || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+
+  // ردیف‌های کاملاً خالی (خط خالی انتهای فایل) حذف می‌شوند
+  return rows.filter((r) => !(r.length === 1 && r[0].trim() === ""));
+}
+
+// ---------------------------------------------------------------------------
+// خواندن ابعاد تصویر از هدر فایل
+// ---------------------------------------------------------------------------
+
+/**
+ * عرض و ارتفاع یک تصویر را از هدر فایل می‌خواند (JPEG و PNG).
+ *
+ * چرا اینجا و نه در زمان رندر صفحه؟ چون خواندن از فایل‌سیستم در هر رندر یعنی
+ * به ازای هر بازدید، به تعداد عکس‌ها فایل باز شود؛ و وقتی تصاویر به object
+ * storage منتقل شوند فایل محلی وجود ندارد. ابعاد یک‌بار همین‌جا خوانده و در
+ * ستون‌های images.width/height ذخیره می‌شود.
+ *
+ * چرا فقط بخش اول فایل خوانده می‌شود؟ ابعاد در هدر است، نه در داده‌ی تصویر.
+ * خواندن کل فایل برای گرفتن چند بایت، ۱۱۶ مگابایت I/O بی‌دلیل بود.
+ *
+ * برای هر خطا یا فرمت ناشناخته null برمی‌گردد — نبودِ ابعاد نباید import را
+ * بخواباند، ستون‌ها nullable هستند.
+ */
+const HEADER_BYTES = 64 * 1024; // برای JPEG کافی است؛ SOF معمولاً در چند کیلوبایت اول است
+
+/** PNG: امضای ۸ بایتی، سپس chunkِ IHDR با width در آفست ۱۶ و height در ۲۰. */
+function pngSize(buf) {
+  if (buf.length < 24) return null;
+  if (buf.readUInt32BE(0) !== 0x89504e47) return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+/**
+ * JPEG: زنجیره‌ی segmentها را دنبال می‌کنیم تا به یکی از markerهای SOF برسیم
+ * (Start Of Frame) که ابعاد را در خود دارد.
+ *
+ * نکته‌های ریز که راه را می‌بندند اگر رعایت نشوند:
+ *  • بین segmentها ممکن است چند 0xFF پشت‌سرهم به‌عنوان padding باشد.
+ *  • markerهای بدون طول (RSTn و SOI/EOI و TEM) طول ندارند و باید رد شوند.
+ *  • SOF2 و بقیه‌ی حالت‌های progressive هم ابعاد دارند، پس همه را می‌پذیریم.
+ *  • 0xC4/0xC8/0xCC در بازه‌ی 0xC0..0xCF هستند ولی SOF نیستند (DHT/JPG/DAC).
+ */
+function jpegSize(buf) {
+  if (buf.length < 4) return null;
+  if (buf.readUInt16BE(0) !== 0xffd8) return null;
+
+  let i = 2;
+  while (i + 3 < buf.length) {
+    if (buf[i] !== 0xff) {
+      i += 1; // هم‌ترازی از دست رفته — جلو می‌رویم تا 0xFF بعدی
+      continue;
+    }
+    let marker = buf[i + 1];
+    let j = i + 1;
+    while (marker === 0xff && j + 1 < buf.length) {
+      j += 1;
+      marker = buf[j]; // رد کردن paddingهای 0xFF
+    }
+
+    // markerهای بدون فیلد طول
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      i = j + 1;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null; // EOI یا شروع داده‌ی تصویر
+
+    if (j + 3 >= buf.length) return null;
+    const length = buf.readUInt16BE(j + 1);
+    if (length < 2) return null;
+
+    const isSof =
+      marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSof) {
+      // ساختار SOF: [طول ۲ بایت][دقت ۱ بایت][ارتفاع ۲ بایت][عرض ۲ بایت]
+      if (j + 8 >= buf.length) return null;
+      return { height: buf.readUInt16BE(j + 4), width: buf.readUInt16BE(j + 6) };
+    }
+    i = j + 1 + length;
+  }
+  return null;
+}
+
+/**
+ * ابعاد تصویرِ متناظر با یک url گالری را برمی‌گرداند.
+ * url مثل «/gallery/0001.jpg» → فایل «<ریشه‌ی پروژه>/public/gallery/0001.jpg».
+ */
+async function readImageSize(publicUrl, projectRoot) {
+  // آدرس‌های مطلق (http…) فایل محلی ندارند — ابعادشان اینجا خوانده نمی‌شود.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(publicUrl)) return null;
+
+  const relative = publicUrl.replace(/^\/+/, "");
+  const absolute = path.join(projectRoot, "public", relative);
+
+  let handle;
+  try {
+    handle = await open(absolute, "r");
+    const buf = Buffer.alloc(HEADER_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, HEADER_BYTES, 0);
+    const head = buf.subarray(0, bytesRead);
+    return pngSize(head) ?? jpegSize(head);
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
+ * ابعاد را روی همه‌ی رکوردها می‌نشاند (rec.width / rec.height).
+ *
+ * موازی با سقف مشخص: ۷۰۰ بار open() هم‌زمان سقف descriptorهای سیستم‌عامل را
+ * می‌زند؛ اجرای کاملاً سری هم روی فایل‌سیستم ویندوز کند است. سقف ۳۲ بین این دو
+ * تعادل معقولی است.
+ */
+async function attachImageSizes(records, projectRoot) {
+  const CONCURRENCY = 32;
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < records.length) {
+      const rec = records[cursor++];
+      const size = await readImageSize(rec.url, projectRoot);
+      rec.width = size?.width ?? null;
+      rec.height = size?.height ?? null;
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, records.length) }, worker));
+}
+
+/** یک مقدار را برای نوشتن در CSV امن می‌کند. */
+function csvCell(value) {
+  const s = String(value ?? "");
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// ---------------------------------------------------------------------------
+// آرگومان‌ها و محیط
+// ---------------------------------------------------------------------------
+
+function parseArgs(argv) {
+  const opts = {
+    file: "./prompts_index_with_titles_2.csv",
+    limit: null,
+    dryRun: false,
+    reset: false,
+    model: null,
+    urlPrefix: "/gallery/",
+    skipped: "./skipped-rows.csv",
+  };
+  for (const raw of argv) {
+    const arg = raw.trim();
+    if (arg === "--dry-run") opts.dryRun = true;
+    else if (arg === "--reset") opts.reset = true;
+    else if (arg.startsWith("--file=")) opts.file = stripQuotes(arg.slice(7));
+    else if (arg.startsWith("--limit=")) opts.limit = Number.parseInt(arg.slice(8), 10);
+    else if (arg.startsWith("--model=")) opts.model = stripQuotes(arg.slice(8));
+    else if (arg.startsWith("--url-prefix=")) opts.urlPrefix = stripQuotes(arg.slice(13));
+    else if (arg.startsWith("--skipped=")) opts.skipped = stripQuotes(arg.slice(10));
+    else if (arg === "--help" || arg === "-h") opts.help = true;
+    else throw new Error(`گزینه‌ی ناشناخته: ${arg}`);
+  }
+  if (opts.limit !== null && (!Number.isFinite(opts.limit) || opts.limit < 1)) {
+    throw new Error("--limit باید یک عدد صحیح مثبت باشد");
+  }
+  return opts;
+}
+
+/**
+ * DATABASE_URL را از .env.local می‌خواند (یا از محیط، اگر آنجا ست شده باشد).
+ * عمداً پکیج dotenv اضافه نمی‌کنیم؛ این فایل فرمت ساده‌ای دارد.
+ */
+async function readDatabaseUrl(projectRoot) {
+  if (!isBlank(process.env.DATABASE_URL)) return process.env.DATABASE_URL.trim();
+
+  const envPath = path.join(projectRoot, ".env.local");
+  if (!existsSync(envPath)) {
+    throw new Error(`DATABASE_URL پیدا نشد و فایل .env.local هم وجود ندارد: ${envPath}`);
+  }
+  const content = await readFile(envPath, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    if (trimmed.slice(0, eq).trim() !== "DATABASE_URL") continue;
+    const value = stripQuotes(trimmed.slice(eq + 1).trim());
+    if (isBlank(value)) break;
+    if (/@host:port\//i.test(value)) {
+      throw new Error("DATABASE_URL هنوز مقدار نمونه (placeholder) است؛ رشته‌ی اتصال واقعی را بگذار.");
+    }
+    return value;
+  }
+  throw new Error("در .env.local مقدار معتبری برای DATABASE_URL نبود.");
+}
+
+/**
+ * همان منطق SSL که lib/db.ts دارد: میزبان محلی بدون SSL، میزبان دور با SSL.
+ * پارامتر sslmode از رشته حذف می‌شود تا pg آن را دوباره تفسیر نکند و رفتار
+ * بین اسکریپت و اپ یکی بماند.
+ */
+function buildPgConfig(connectionString) {
+  let url;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    throw new Error("DATABASE_URL یک URL معتبر نیست.");
+  }
+  const host = url.hostname.toLowerCase();
+  const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "";
+  url.searchParams.delete("sslmode");
+  return {
+    connectionString: url.toString(),
+    ssl: isLocal ? false : { rejectUnauthorized: false },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// اعتبارسنجی ردیف‌ها
+// ---------------------------------------------------------------------------
+
+const REASONS = {
+  noFile: "نام فایل تصویر خالی است (آدرسی برای عکس ساخته نمی‌شود)",
+  noPrompt: "متن پرامپت خالی است",
+  noCategory: "هیچ دسته‌بندی معتبری ندارد",
+  duplicate: "نام فایل تکراری است (ردیف قبلی همین فایل را داشته)",
+};
+
+/**
+ * هدرها را به شماره ستون نگاشت می‌کند. تطبیقِ «دقیق» است نه زیررشته‌ای، چون
+ * «تصویر» زیررشته‌ی «نام فایل تصویر» و «عنوان تصویر» هم هست.
+ */
+function mapHeader(headerRow) {
+  const normalized = headerRow.map((h) => normalizeFa(h));
+  const indices = {};
+  const warnings = [];
+  for (const [key, spec] of Object.entries(COLUMNS)) {
+    const found = normalized.indexOf(normalizeFa(spec.name));
+    if (found !== -1) {
+      indices[key] = found;
+    } else {
+      indices[key] = spec.fallbackIndex;
+      warnings.push(`ستون «${spec.name}» با نام پیدا نشد؛ از شماره ستون ${spec.fallbackIndex + 1} استفاده شد.`);
+    }
+  }
+  return { indices, warnings };
+}
+
+function buildRecords(rows, opts, lookup) {
+  const headerRow = rows[0] ?? [];
+  const { indices, warnings } = mapHeader(headerRow);
+
+  let dataRows = rows.slice(1);
+  if (opts.limit !== null) dataRows = dataRows.slice(0, opts.limit);
+
+  const cell = (row, key) => (row[indices[key]] ?? "").trim();
+
+  const records = [];
+  const skipped = [];
+  const seenFiles = new Map();
+  const unknownCategories = new Map();
+
+  dataRows.forEach((row, idx) => {
+    const rowLabel = cell(row, "row") || String(idx + 1);
+    const csvLine = idx + 2; // +1 برای هدر، +1 چون از ۱ می‌شماریم
+    const fileName = cell(row, "file");
+    const link = cell(row, "link");
+    const promptText = (row[indices.prompt] ?? "").trim();
+    const titleFa = cell(row, "title");
+    const rawCats = cell(row, "cats");
+
+    const fail = (reason) =>
+      skipped.push({ rowLabel, csvLine, reason, fileName, rawCats, titleFa, promptLength: promptText.length });
+
+    // آدرس تصویر: اگر ستون «تصویر» پر بود همان را می‌گیریم (برای آینده که لینک
+    // واقعی داشته باشیم)، وگرنه از نام فایل می‌سازیم.
+    let url = "";
+    if (!isBlank(link)) url = link;
+    else if (!isBlank(fileName)) url = opts.urlPrefix + fileName.replace(/^\/+/, "");
+
+    if (isBlank(url)) return fail(REASONS.noFile);
+    if (isBlank(promptText)) return fail(REASONS.noPrompt);
+
+    const catNames = rawCats
+      .split(/[،,]/)
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
+
+    const slugs = [];
+    for (const name of catNames) {
+      const slug = lookup.get(normalizeFa(name));
+      if (slug) {
+        if (!slugs.includes(slug)) slugs.push(slug);
+      } else {
+        unknownCategories.set(name, (unknownCategories.get(name) ?? 0) + 1);
+      }
+    }
+    if (slugs.length === 0) return fail(REASONS.noCategory);
+
+    const dupKey = url.toLowerCase();
+    if (seenFiles.has(dupKey)) {
+      return fail(`${REASONS.duplicate} — ردیف ${seenFiles.get(dupKey)}`);
+    }
+    seenFiles.set(dupKey, rowLabel);
+
+    records.push({
+      rowLabel,
+      csvLine,
+      url,
+      titleFa: isBlank(titleFa) ? null : titleFa,
+      promptText,
+      slugs,
+      // تاریخ واقعیِ ستون «تاریخ» (اگر خوانده شد) مبنای created_at است، تا
+      // ترتیب گالری همان ترتیب واقعیِ تولید محتوا باشد.
+      createdAt: parseRowDate(cell(row, "date")),
+      // fallback وقتی تاریخ نبود یا خراب بود: پله‌پله از الان عقب می‌رویم، ولی
+      // برعکسِ نسخه‌ی قبلی — ردیفِ آخرِ فایل جدیدترین می‌شود، نه ردیف اول. در
+      // این فایل تاریخ‌ها با شماره ردیف صعودی‌اند (ردیف ۱ قدیمی‌ترین)، پس
+      // منطق قبلی گالری را کاملاً برعکس می‌چید.
+      offsetMinutes: dataRows.length - 1 - idx,
+    });
+  });
+
+  return { records, skipped, warnings, unknownCategories, headerRow };
+}
+
+// ---------------------------------------------------------------------------
+// گزارش
+// ---------------------------------------------------------------------------
+
+/** تاریخ را برای نمایش در گزارش قالب‌بندی می‌کند (وقت محلی، بدون وابستگی). */
+function fmtDate(dt) {
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())} ${p(dt.getHours())}:${p(dt.getMinutes())}:${p(dt.getSeconds())}`;
+}
+
+function printPreview(records, limit = 5) {
+  const shown = records.slice(0, limit);
+  for (const rec of shown) {
+    const oneLine = rec.promptText.replace(/\s+/g, " ");
+    const snippet = oneLine.length > 100 ? `${oneLine.slice(0, 100)}…` : oneLine;
+    console.log(`\n── ردیف ${rec.rowLabel} ${"─".repeat(46)}`);
+    console.log(`   url        : ${rec.url}`);
+    console.log(`   title_fa   : ${rec.titleFa ?? "(خالی → NULL)"}`);
+    console.log(`   categories : ${rec.slugs.join(", ")}`);
+    console.log(
+      `   ابعاد      : ${rec.width && rec.height ? `${rec.width}×${rec.height} (نسبت ${(rec.width / rec.height).toFixed(3)})` : "(خوانده نشد → NULL)"}`,
+    );
+    console.log(
+      `   created_at : ${rec.createdAt ? fmtDate(rec.createdAt) : "(تاریخ خوانده نشد → از ترتیب ردیف ساخته می‌شود)"}`,
+    );
+    console.log(`   prompt     : ${rec.promptText.length} کاراکتر — «${snippet}»`);
+  }
+}
+
+function printSummary({ records, skipped, unknownCategories, dryRun, inserted }) {
+  console.log(`\n${"═".repeat(64)}`);
+  console.log("خلاصه");
+  console.log("═".repeat(64));
+  if (dryRun) {
+    console.log(`آماده‌ی ورود (تمرین خشک، چیزی نوشته نشد): ${records.length}`);
+  } else {
+    console.log(`وارد شد   : ${inserted}`);
+  }
+  console.log(`رد شد     : ${skipped.length}`);
+
+  // وضعیت تاریخ‌ها — چون created_at ترتیب «جدیدترین» گالری را می‌سازد، اگر
+  // بی‌صدا به fallback بیفتد باید در گزارش دیده شود.
+  const withDate = records.filter((r) => r.createdAt);
+  const withoutDate = records.length - withDate.length;
+  if (records.length > 0) {
+    if (withDate.length > 0) {
+      const times = withDate.map((r) => r.createdAt.getTime());
+      const oldest = new Date(Math.min(...times));
+      const newest = new Date(Math.max(...times));
+      console.log(`\ncreated_at از ستون «تاریخ»: ${withDate.length} ردیف`);
+      console.log(`   قدیمی‌ترین : ${fmtDate(oldest)}`);
+      console.log(`   جدیدترین  : ${fmtDate(newest)}`);
+    }
+    if (withoutDate > 0) {
+      console.log(
+        `⚠ ${withoutDate} ردیف تاریخ معتبر نداشت؛ created_at آن‌ها از ترتیب ردیف ساخته می‌شود.`,
+      );
+    }
+
+    // وضعیت ابعاد — اگر خوانده نشوند، گالری به نسبت‌تصویر پیش‌فرض می‌افتد و
+    // چیدمان masonry بی‌معنا می‌شود، پس این عدد باید دیده شود.
+    const sized = records.filter((r) => r.width && r.height);
+    console.log(`\nابعاد خوانده‌شده از فایل تصویر: ${sized.length} از ${records.length}`);
+    if (sized.length < records.length) {
+      const missing = records.filter((r) => !(r.width && r.height));
+      console.log(`⚠ ${missing.length} تصویر ابعاد ندارد (width/height = NULL):`);
+      for (const r of missing.slice(0, 10)) console.log(`   ردیف ${r.rowLabel} — ${r.url}`);
+      if (missing.length > 10) console.log(`   … و ${missing.length - 10} مورد دیگر`);
+    }
+    if (sized.length > 0) {
+      const ratios = sized.map((r) => r.width / r.height);
+      const portrait = ratios.filter((x) => x < 0.98).length;
+      const square = ratios.filter((x) => x >= 0.98 && x <= 1.03).length;
+      const landscape = ratios.filter((x) => x > 1.03).length;
+      console.log(`   عمودی ${portrait} | مربع ${square} | افقی ${landscape}`);
+    }
+  }
+
+  if (skipped.length > 0) {
+    const byReason = new Map();
+    for (const s of skipped) {
+      const key = s.reason.split(" — ")[0];
+      byReason.set(key, (byReason.get(key) ?? 0) + 1);
+    }
+    console.log("\nتفکیک دلایل رد شدن:");
+    for (const [reason, count] of [...byReason].sort((a, b) => b[1] - a[1])) {
+      console.log(`   ${count}×  ${reason}`);
+    }
+  }
+
+  if (unknownCategories.size > 0) {
+    console.log("\n⚠ دسته‌بندی‌های ناشناخته که نادیده گرفته شدند:");
+    for (const [name, count] of [...unknownCategories].sort((a, b) => b[1] - a[1])) {
+      console.log(`   ${count}×  «${name}»`);
+    }
+    console.log("   (اگر باید بمانند، به TAXONOMY در همین فایل اضافه‌شان کن.)");
+  }
+
+  const perCat = new Map();
+  for (const rec of records) {
+    for (const slug of rec.slugs) perCat.set(slug, (perCat.get(slug) ?? 0) + 1);
+  }
+  if (perCat.size > 0) {
+    console.log("\nتعداد عکس در هر دسته:");
+    for (const { slug, name_fa } of TAXONOMY) {
+      const n = perCat.get(slug) ?? 0;
+      if (n > 0) console.log(`   ${String(n).padStart(4)}  ${slug.padEnd(13)} ${name_fa}`);
+    }
+  }
+}
+
+async function writeSkippedLog(skipped, targetPath) {
+  const header = ["ردیف", "خط CSV", "دلیل رد شدن", "نام فایل تصویر", "دسته‌بندی‌ها", "عنوان تصویر", "طول پرامپت"];
+  const lines = [header.map(csvCell).join(",")];
+  for (const s of skipped) {
+    lines.push(
+      [s.rowLabel, s.csvLine, s.reason, s.fileName, s.rawCats, s.titleFa, s.promptLength].map(csvCell).join(","),
+    );
+  }
+  // BOM تا اکسل، فارسی را درست باز کند (وگرنه متن به‌هم‌ریخته نشان می‌دهد)
+  await writeFile(targetPath, `﻿${lines.join("\r\n")}\r\n`, "utf8");
+}
+
+// ---------------------------------------------------------------------------
+// نوشتن در دیتابیس
+// ---------------------------------------------------------------------------
+
+async function importToDatabase(records, opts, projectRoot) {
+  const connectionString = await readDatabaseUrl(projectRoot);
+  const { default: pg } = await import("pg");
+  const client = new pg.Client(buildPgConfig(connectionString));
+
+  await client.connect();
+  console.log("به دیتابیس وصل شد.");
+
+  const failures = [];
+  let inserted = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    if (opts.reset) {
+      // TRUNCATE با CASCADE و RESTART IDENTITY: هم داده‌های placeholder می‌روند
+      // هم شمارنده‌ی id از ۱ شروع می‌شود. pending_prompts دست‌نخورده می‌ماند.
+      await client.query(
+        "TRUNCATE image_categories, prompts, images, categories RESTART IDENTITY CASCADE",
+      );
+      console.log("جدول‌های categories/images/prompts/image_categories خالی شدند (۳۰ رکورد تستی رفت).");
+    }
+
+    // دسته‌ها را می‌سازد یا نامشان را به‌روز می‌کند و id هرکدام را می‌گیرد.
+    const catId = new Map();
+    for (const { slug, name_fa } of TAXONOMY) {
+      const res = await client.query(
+        `INSERT INTO categories (name_fa, slug) VALUES ($1, $2)
+         ON CONFLICT (slug) DO UPDATE SET name_fa = EXCLUDED.name_fa
+         RETURNING id`,
+        [name_fa, slug],
+      );
+      catId.set(slug, res.rows[0].id);
+    }
+    console.log(`${TAXONOMY.length} دسته‌بندی آماده شد.`);
+
+    const baseTime = Date.now();
+
+    for (const rec of records) {
+      // SAVEPOINT به ازای هر ردیف: اگر یک ردیف در سطح دیتابیس خطا بدهد، فقط
+      // خودش برمی‌گردد و تراکنش کلی سالم می‌ماند. بدون این، اولین خطا کل
+      // تراکنش را «aborted» می‌کرد و بقیه‌ی ردیف‌ها هم می‌سوختند.
+      await client.query("SAVEPOINT row_sp");
+      try {
+        const createdAt = rec.createdAt ?? new Date(baseTime - rec.offsetMinutes * 60_000);
+        const img = await client.query(
+          `INSERT INTO images (url, title_fa, model_used, created_at, width, height)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [rec.url, rec.titleFa, opts.model, createdAt, rec.width ?? null, rec.height ?? null],
+        );
+        const imageId = img.rows[0].id;
+
+        await client.query(`INSERT INTO prompts (image_id, prompt_text) VALUES ($1, $2)`, [
+          imageId,
+          rec.promptText,
+        ]);
+
+        for (const slug of rec.slugs) {
+          await client.query(
+            `INSERT INTO image_categories (image_id, category_id) VALUES ($1, $2)
+             ON CONFLICT DO NOTHING`,
+            [imageId, catId.get(slug)],
+          );
+        }
+
+        await client.query("RELEASE SAVEPOINT row_sp");
+        inserted += 1;
+      } catch (err) {
+        await client.query("ROLLBACK TO SAVEPOINT row_sp");
+        failures.push({
+          rowLabel: rec.rowLabel,
+          csvLine: rec.csvLine,
+          reason: `خطای دیتابیس: ${err instanceof Error ? err.message : String(err)}`,
+          fileName: rec.url,
+          rawCats: rec.slugs.join("، "),
+          titleFa: rec.titleFa ?? "",
+          promptLength: rec.promptText.length,
+        });
+      }
+    }
+
+    await client.query("COMMIT");
+    console.log("تراکنش COMMIT شد.");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    await client.end();
+  }
+
+  return { inserted, failures };
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+
+  if (opts.help) {
+    console.log("راهنما در توضیحات بالای همین فایل است: scripts/import-content.mjs");
+    return;
+  }
+
+  // ریشه‌ی پروژه = یک پوشه بالاتر از scripts/
+  // چرا fileURLToPath و نه new URL(...).pathname؟ چون pathname مسیر را
+  // percent-encoded برمی‌گرداند: پوشه‌ی «promptesh project» می‌شود
+  // «promptesh%20project» و فایل هیچ‌وقت پیدا نمی‌شود. fileURLToPath هم
+  // decode می‌کند و هم حرفِ درایوِ ویندوز را درست درمی‌آورد.
+  const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const csvPath = path.resolve(projectRoot, opts.file);
+
+  if (!existsSync(csvPath)) {
+    throw new Error(
+      `فایل CSV پیدا نشد: ${csvPath}\n` +
+        "فایل را در ریشه‌ی پروژه بگذار یا با --file=«مسیر کامل» آدرسش را بده.",
+    );
+  }
+
+  console.log(`فایل: ${csvPath}`);
+  if (opts.dryRun) console.log("حالت: تمرین خشک (--dry-run) — به دیتابیس وصل نمی‌شود و چیزی نمی‌نویسد.");
+  if (opts.limit !== null) console.log(`محدودیت: فقط ${opts.limit} ردیف اول`);
+
+  const raw = await readFile(csvPath, "utf8");
+  const rows = parseCsv(raw);
+  if (rows.length < 2) throw new Error("فایل CSV هدر یا داده ندارد.");
+  console.log(`خوانده شد: ${rows.length - 1} ردیف داده`);
+
+  const lookup = new Map(TAXONOMY.map((c) => [normalizeFa(c.name_fa), c.slug]));
+  const { records, skipped, warnings, unknownCategories, headerRow } = buildRecords(rows, opts, lookup);
+
+  console.log(`هدرها: ${headerRow.join(" | ")}`);
+  for (const w of warnings) console.log(`⚠ ${w}`);
+
+  // ابعاد تصاویر پیش از هر خروجی خوانده می‌شود، تا در --dry-run هم قابل بازبینی
+  // باشد و نه فقط موقع نوشتن در دیتابیس.
+  await attachImageSizes(records, projectRoot);
+
+  let inserted = 0;
+  const allSkipped = [...skipped];
+
+  if (opts.dryRun) {
+    printPreview(records, opts.limit ?? 5);
+  } else {
+    const result = await importToDatabase(records, opts, projectRoot);
+    inserted = result.inserted;
+    allSkipped.push(...result.failures);
+  }
+
+  if (allSkipped.length > 0) {
+    const skippedPath = path.resolve(projectRoot, opts.skipped);
+    await writeSkippedLog(allSkipped, skippedPath);
+    console.log(`\nلاگ ردیف‌های ردشده نوشته شد: ${skippedPath}`);
+  }
+
+  printSummary({ records, skipped: allSkipped, unknownCategories, dryRun: opts.dryRun, inserted });
+
+  if (opts.dryRun) {
+    console.log("\nهیچ چیزی در دیتابیس نوشته نشد. برای ورود واقعی --dry-run را بردار.");
+  }
+}
+
+main().catch((err) => {
+  console.error(`\n✗ اسکریپت متوقف شد: ${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+});

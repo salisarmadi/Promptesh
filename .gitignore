@@ -1,0 +1,69 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+# ...except the template, which carries no secrets and documents the required keys
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# ---------------------------------------------------------------------------
+# محتوا (عکس‌ها و فایل منبع اکسل)
+# ---------------------------------------------------------------------------
+#
+# چرا عکس‌ها در git نیستند: public/gallery حدود ۱۱۶ مگابایت jpg است (۷۰۰ فایل).
+# git برای فایل باینری delta نمی‌سازد، پس هر تغییر یک نسخه‌ی کامل جدید ذخیره
+# می‌کند و مخزن دیگر هیچ‌وقت سبک نمی‌شود. این عکس‌ها هم قرار است به object
+# storage منتقل شوند، پس از همان اول بیرون می‌مانند.
+/public/gallery/*
+!/public/gallery/.gitkeep
+
+# چرا اکسل در git نیست: ۱۷ مگابایت است که ۱۶.۱ مگابایتش ۷۰۰ تصویر جاسازی‌شده
+# در ستون «تصویر» است — یعنی همان عکس‌های public/gallery، دوباره. داده‌ی
+# بامعنایش (پرامپت، عنوان، دسته‌بندی، تاریخ) فقط ۱ مگابایت است و در CSV هست.
+*.xlsx
+
+# CSV عمداً commit می‌شود: منبع ورودی import است، متنی و قابل diff، و تنها
+# نسخه‌ی نسخه‌بندی‌شده‌ی ۷۰۰ پرامپت. با scripts/xlsx-to-csv.py بازتولید می‌شود.
+!prompts_index_with_titles_2.csv
+
+# لاگ ردیف‌های ردشده‌ی import — خروجی موقت، هر اجرا بازنویسی می‌شود.
+/skipped-rows.csv
+
+# placeholderهای مرحله‌ی توسعه — بعد از import محتوای واقعی بی‌استفاده‌اند.
+/public/placeholders/
