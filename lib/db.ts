@@ -59,6 +59,25 @@ export function isUndefinedTableError(err: unknown): boolean {
 }
 
 /**
+ * کد خطای «ستون وجود ندارد» در Postgres (۴۲۷۰۳).
+ *
+ * معنایش دقیقاً یک چیز است: جدول‌ها ساخته شده‌اند ولی اسکیما از کد عقب‌تر است،
+ * چون `CREATE TABLE IF NOT EXISTS` روی دیتابیسی که جدولش از قبل هست هیچ کاری
+ * نمی‌کند و ستونِ تازه را اضافه نمی‌کند. یعنی یک فایلِ migration اجرا نشده.
+ *
+ * چرا جدا از خطای عمومی: بدون این، کاربر یک کادرِ قرمزِ «خطا در خواندنِ گالری»
+ * با متنِ خامِ Postgres می‌دید و باید حدس می‌زد چه کند. با این، همان صفحه
+ * می‌گوید کدام فایل را اجرا کند.
+ */
+export function isUndefinedColumnError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === "42703"
+  );
+}
+
+/**
  * تعیین تنظیمات SSL.
  *
  * دیتابیس‌های مدیریت‌شده (از جمله Liara) معمولاً گواهی امضاشده توسط CA

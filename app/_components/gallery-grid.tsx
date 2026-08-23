@@ -1,24 +1,62 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import Image from "next/image";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import type { GalleryImage } from "@/lib/gallery";
+import { CopyButton } from "./copy-button";
+import { X } from "./icons";
 
 /**
- * گرید تعاملی گالری + مودال جزئیات + دکمه کپی پرامپت. (کامپوننت کلاینتی)
+ * گریدِ گالری + مودالِ جزئیات. (کامپوننت کلاینتی — برای باز/بستهٔ مودال)
  *
- * ⚠️ TODO — قبل از لانچ عمومی: route اختصاصی برای هر تصویر اضافه شود.
- * الان مودال کاملاً کلاینتی است (MVP): URL عوض نمی‌شود، پس لینکِ یک پرامپت
- * قابل‌اشتراک نیست، صفحه‌ی سئوی مستقل ندارد، و متن پرامپت همراه کل لیست eager
- * لود می‌شود. مسیر درست پیش از انتشار عمومی: /image/[id] با intercepting/parallel
- * routes — هم مودال از داخل گرید، هم صفحه‌ی واقعیِ قابل‌اشتراک/سئو، و lazy شدن
- * لود پرامپت. (طبق تصمیم ۲۰۲۶-۰۸-۱۶ عمداً برای MVP ساده نگه داشته شده.)
+ * چیدمان: columns-* یعنی masonry واقعیِ CSS. ماک از grid با aspectRatio ثابت
+ * (۳/۴ یا ۴/۳) و object-cover استفاده کرده؛ آن را برنداشتیم، چون محتوای واقعی
+ * ۲۰۲ نسبتِ متفاوت دارد (۳۹۳ عکس نزدیکِ ۹:۱۶ و ۱۴ عکس افقی) و بریدنشان به دو
+ * نسبتِ ثابت یعنی سرِ آدم‌ها از کادر بیرون بزند. نسبتِ واقعی می‌ماند.
+ *
+ * ── سه چیزی که از کارتِ ماک عمداً برداشته شد ──
+ * ۱) شمارِ لایک: در تمام ۷۰۰ ردیف صفر است (سیستمِ لایک وجود ندارد). «♥ ۰» روی
+ *    هر کارت نه اطلاعاتی می‌دهد و نه بی‌ضرر است — سایت را خراب نشان می‌دهد.
+ * ۲) نشانِ نامِ مدل: در تمام ۷۰۰ ردیف NULL است (ستونی برایش در منبع نبود).
+ * ۳) برچسبِ دسته: ۶۲۴ از ۷۰۰ عکس «پرتره» است، یعنی برچسبی که روی ۸۹٪ کارت‌ها
+ *    یک کلمه‌ی تکراری است و چیزی را از چیزی جدا نمی‌کند.
+ *
+ * قاعده‌ی مشترکِ هر سه: نشانی که روی همه‌ی کارت‌ها یکسان است، تزئین است نه
+ * اطلاع. جایشان چیزی آمد که واقعاً به ازای هر کارت فرق می‌کند: عنوانِ فارسیِ
+ * خودِ عکس، روی همان گرادیانی که ماک برای متنِ روی کارت گذاشته بود.
+ *
+ * ⚠️ TODO — قبل از لانچِ عمومی: مسیرِ اختصاصی /image/[id]. الان مودال کاملاً
+ * کلاینتی است (MVP): URL عوض نمی‌شود، پس لینکِ یک پرامپت قابل‌اشتراک نیست،
+ * صفحه‌ی سئوی مستقل ندارد، و متنِ پرامپت همراهِ کلِ لیست eager لود می‌شود.
+ * مسیرِ درست: intercepting/parallel routes — هم مودال از داخلِ گرید، هم
+ * صفحه‌ی واقعیِ قابل‌اشتراک. (طبق تصمیمِ ۲۰۲۶-۰۸-۱۶ عمداً برای MVP ساده ماند.)
+ * توجه: آدرس باید /image/[id] باشد نه slugِ عنوان — ۲۹۰ ردیف عنوانِ تکراری
+ * دارند و slug به هم برمی‌خورد.
  */
 
 const numFa = new Intl.NumberFormat("fa-IR");
 
-/** آیتم گرید: همان GalleryImage به‌همراه ابعادی که سمت سرور از فایل خوانده شده. */
-export type GalleryGridItem = GalleryImage & { width: number; height: number };
+/**
+ * گرادیانِ زیرِ متنِ روی کارت — عیناً از ماک.
+ *
+ * ⚠️ اگر روی عکس‌های خیلی روشن عنوان سخت خوانده شد، اهرمش همین عدد ۰٫۶۲ است
+ * (تیره‌ترش کن)، نه اضافه‌کردنِ text-shadow؛ سایه‌ی متن روی عکس همیشه کثیف
+ * به نظر می‌رسد.
+ */
+const CARD_SCRIM = "linear-gradient(to top, rgba(10,9,26,0.62) 0%, rgba(10,9,26,0) 100%)";
+
+/** آیتمِ گرید: GalleryImage به‌همراه ابعادِ قطعی و تاریخِ آماده‌ی نمایش. */
+export type GalleryGridItem = GalleryImage & {
+  width: number;
+  height: number;
+  /**
+   * تاریخِ شمسیِ از پیش قالب‌بندی‌شده. سمتِ سرور ساخته می‌شود و نه اینجا: اگر
+   * Date را در کامپوننتِ کلاینتی قالب‌بندی کنیم، منطقهٔ زمانیِ سرور و مرورگر
+   * می‌توانند فرق کنند و hydration mismatch می‌دهد.
+   */
+  dateFa: string;
+};
 
 export function GalleryGrid({ items }: { items: GalleryGridItem[] }) {
   const [openId, setOpenId] = useState<string | null>(null);
@@ -27,221 +65,229 @@ export function GalleryGrid({ items }: { items: GalleryGridItem[] }) {
   return (
     <>
       <section className="columns-2 gap-3 sm:columns-3 lg:columns-4">
-        {items.map((img, idx) => (
+        {items.map((img) => (
           <article
             key={img.id}
-            className="relative mb-3 break-inside-avoid overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm transition-shadow hover:shadow-md"
+            /* کارت حاشیه ندارد: در ماک تنها چیزی که آن را از زمینه‌ی سفید جدا
+               می‌کند یک سایه‌ی تیره‌ی پخش‌منفی است. bg-surface-image زمینه‌ی
+               جای‌خالیِ عکس تا لحظه‌ی بارگذاری است. */
+            className="relative mb-3 break-inside-avoid overflow-hidden rounded-card bg-surface-image shadow-card"
           >
-            {/* دکمه‌ی شفافِ روی کل کارت: کلیک‌پذیری + دسترسی با کیبورد، بدون
-                گذاشتن عناصر بلوکی داخل <button> (که HTML نامعتبر می‌شد). */}
+            {/* دکمه‌ی شفافِ روی کلِ کارت: کلیک‌پذیری + دسترسی با کیبورد، بدون
+                گذاشتنِ عناصرِ بلوکی داخلِ <button> (که HTML نامعتبر می‌شد).
+                حلقه‌ی فوکوس از قاعده‌ی سراسریِ globals.css می‌آید. */}
             <button
               type="button"
               onClick={() => setOpenId(img.id)}
-              aria-label={`دیدن پرامپت${img.title_fa ? `: ${img.title_fa}` : ""}`}
-              className="absolute inset-0 z-10 cursor-pointer rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+              aria-label={`دیدنِ پرامپت${img.title_fa ? `: ${img.title_fa}` : ""}`}
+              className="absolute inset-0 z-10 cursor-pointer rounded-card"
             />
 
-            <div className="relative">
-              <Image
-                src={img.url}
-                alt={img.title_fa ?? "تصویر ساخته‌شده با هوش مصنوعی"}
-                width={img.width}
-                height={img.height}
-                sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
-                priority={idx < 3}
-                className="h-auto w-full"
-              />
+            <Image
+              src={img.url}
+              alt={img.title_fa ?? "تصویرِ ساخته‌شده با هوش مصنوعی"}
+              width={img.width}
+              height={img.height}
+              sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw"
+              /* priority ندارد: گرید زیرِ هیرو است و LCP همان کارت‌های هیروست.
+                 priority دادن به چند کارتِ پایینِ صفحه فقط پهنای باند را از
+                 LCP می‌دزدد. */
+              className="block h-auto w-full"
+            />
 
-              {img.categories.length > 0 ? (
-                <div className="absolute right-2 top-2 flex flex-wrap justify-end gap-1">
-                  {img.categories.map((c) => (
-                    <span
-                      key={c.slug}
-                      className="rounded-full bg-white/85 px-2 py-0.5 text-[11px] font-medium text-gray-700 backdrop-blur-sm"
-                    >
-                      {c.name_fa}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-
-              {img.title_fa ? (
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 via-black/25 to-transparent p-3 pt-8">
-                  <h2 className="line-clamp-2 text-sm font-medium leading-snug text-white">
-                    {img.title_fa}
-                  </h2>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="flex items-center justify-between gap-2 px-3 py-2">
-              {img.model_used ? (
-                <span dir="ltr" className="truncate font-mono text-[11px] text-gray-400">
-                  {img.model_used}
-                </span>
-              ) : (
-                <span />
-              )}
-              <span className="shrink-0 text-xs text-gray-500">
-                <span className="text-indigo-500" aria-hidden>
-                  ♥
-                </span>{" "}
-                {numFa.format(img.likes_count)}
-              </span>
-            </div>
+            {img.title_fa ? (
+              <>
+                <div
+                  aria-hidden
+                  className="pointer-events-none absolute inset-x-0 bottom-0 h-2/5"
+                  style={{ background: CARD_SCRIM }}
+                />
+                {/* عنوان روی خودِ عکس می‌نشیند، مثلِ ماک. دو خط سقفش است: خطِ
+                    سوم روی موبایل نیمی از عکس را می‌پوشاند. */}
+                <h2 className="pointer-events-none absolute inset-x-2.5 bottom-2 line-clamp-2 text-[11.5px] font-bold leading-[1.55] text-white">
+                  {img.title_fa}
+                </h2>
+              </>
+            ) : null}
           </article>
         ))}
       </section>
 
-      {active ? <ImageModal img={active} onClose={() => setOpenId(null)} /> : null}
+      {/* AnimatePresence بیرونِ شرط است تا انیمیشنِ بسته‌شدن فرصتِ اجرا داشته
+          باشد؛ اگر مودال بی‌واسطه از درخت حذف شود، exit هیچ‌وقت دیده نمی‌شود. */}
+      <AnimatePresence>
+        {active ? (
+          <ImageModal key={active.id} img={active} onClose={() => setOpenId(null)} />
+        ) : null}
+      </AnimatePresence>
     </>
   );
 }
 
 /**
- * مودال جزئیات: عکس بزرگ + عنوان + دسته‌ها + مدل + پرامپتِ قابل‌کپی.
- * Esc و کلیک روی پس‌زمینه می‌بندند؛ اسکرول صفحه هنگام باز بودن قفل می‌شود.
+ * مودالِ جزئیات: عکسِ کامل + عنوان + دسته‌ها + تاریخ + پرامپتِ قابل‌کپی.
+ *
+ * فرمِ ماک: روی موبایل یک «برگه‌ی پایینی» که از لبه‌ی زیر بالا می‌آید و با
+ * کشیدن به پایین بسته می‌شود؛ روی دسکتاپ همان کارتِ وسط‌چین. این فرم مهم است
+ * چون کنشِ اصلیِ کلِ محصول (کپیِ پرامپت) همین‌جاست و روی موبایل باید نزدیکِ
+ * شستِ کاربر باشد، نه در وسطِ صفحه.
+ *
+ * Esc، کلیک روی پس‌زمینه و کشیدن به پایین می‌بندند؛ اسکرولِ صفحه قفل می‌شود.
  */
 function ImageModal({ img, onClose }: { img: GalleryGridItem; onClose: () => void }) {
+  const reduced = useReducedMotion();
+  const titleId = useId();
+  const closeRef = useRef<HTMLButtonElement>(null);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
-    // قفل اسکرول پس‌زمینه تا صفحه پشت مودال جابه‌جا نشود.
+
+    // قفلِ اسکرولِ پس‌زمینه تا صفحه پشتِ مودال جابه‌جا نشود.
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+
+    // فوکوس باید داخلِ مودال برود و در بستن به همان کارتی برگردد که بازش کرد،
+    // وگرنه کاربرِ کیبورد بعد از بستن سرِ صفحه پرت می‌شود و باید از اول تا
+    // کارتِ بعدی Tab بزند.
+    const prevFocus = document.activeElement as HTMLElement | null;
+    closeRef.current?.focus();
+
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
+      prevFocus?.focus();
     };
   }, [onClose]);
 
+  const spring = reduced
+    ? ({ duration: 0 } as const)
+    : ({ type: "spring", stiffness: 320, damping: 34 } as const);
+
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label={img.title_fa ?? "جزئیات تصویر"}
-      onClick={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="relative flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl sm:flex-row"
-      >
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="بستن"
-          className="absolute left-3 top-3 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/45 text-lg leading-none text-white transition-colors hover:bg-black/65"
+    <>
+      {/* پرده. رنگش عیناً از ماک است و کمی از --color-ink تیره‌تر؛ عمداً توکن
+          نشد چون تنها کاربردش همین یک جاست. */}
+      <motion.div
+        onClick={onClose}
+        className="fixed inset-0 z-50 bg-[rgba(14,13,32,0.55)] backdrop-blur-[2px]"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        transition={reduced ? { duration: 0 } : { duration: 0.18 }}
+      />
+
+      {/* ظرفِ جای‌گیری. pointer-events-none تا کلیکِ کنارِ مودال به پرده‌ی
+          زیرش برسد و ببندد؛ خودِ برگه دوباره auto می‌شود. */}
+      <div className="pointer-events-none fixed inset-0 z-50 flex items-end justify-center md:items-center">
+        <motion.div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={img.title_fa ? titleId : undefined}
+          aria-label={img.title_fa ? undefined : "جزئیاتِ تصویر"}
+          className="pointer-events-auto mb-3 max-h-[86vh] w-[calc(100%-24px)] max-w-[400px] overflow-hidden rounded-[28px] bg-canvas shadow-modal md:mb-0 md:max-w-[620px]"
+          initial={{ y: 130, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: 130, opacity: 0 }}
+          transition={spring}
+          /* کشیدن به پایین برای بستن — روی موبایل طبیعی‌ترین راهِ بستن است.
+             dragConstraints.top = 0 یعنی به بالا کشیده نمی‌شود. */
+          drag={reduced ? false : "y"}
+          dragConstraints={{ top: 0 }}
+          dragElastic={{ top: 0, bottom: 0.22 }}
+          onDragEnd={(_event, info) => {
+            if (info.offset.y > 90) onClose();
+          }}
         >
-          ×
-        </button>
-
-        {/* سمت عکس */}
-        <div className="flex shrink-0 items-center justify-center bg-gray-50 sm:w-1/2">
-          <Image
-            src={img.url}
-            alt={img.title_fa ?? "تصویر ساخته‌شده با هوش مصنوعی"}
-            width={img.width}
-            height={img.height}
-            sizes="(max-width: 640px) 100vw, 50vw"
-            className="max-h-[45vh] w-full object-contain sm:max-h-[90vh]"
-          />
-        </div>
-
-        {/* سمت جزئیات (اسکرول‌پذیر) */}
-        <div className="flex min-w-0 flex-1 flex-col gap-3 overflow-y-auto p-4 sm:p-5">
-          {img.title_fa ? (
-            <h2 className="text-lg font-bold leading-snug text-gray-900">{img.title_fa}</h2>
-          ) : null}
-
-          {img.categories.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {img.categories.map((c) => (
-                <span
-                  key={c.slug}
-                  className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-700"
-                >
-                  {c.name_fa}
-                </span>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="flex items-center gap-3 text-xs text-gray-500">
-            {img.model_used ? (
-              <span dir="ltr" className="font-mono">
-                {img.model_used}
-              </span>
-            ) : null}
-            <span className="flex items-center gap-1">
-              <span className="text-indigo-500" aria-hidden>
-                ♥
-              </span>
-              {numFa.format(img.likes_count)}
-            </span>
+          {/* دستگیره‌ی کشیدن + دکمه‌ی بستن */}
+          <div className="relative flex items-center justify-center pb-2 pt-3">
+            <div className="h-[5px] w-9 rounded-full bg-line" aria-hidden />
+            <button
+              ref={closeRef}
+              type="button"
+              onClick={onClose}
+              aria-label="بستن"
+              className="absolute end-3 top-2 flex size-[30px] items-center justify-center rounded-full bg-surface text-muted transition-transform active:scale-95"
+            >
+              <X size={15} />
+            </button>
           </div>
 
-          {/* پرامپت — قلب محصول: LTR، مونواسپیس، با دکمه‌ی کپی */}
-          {img.prompt_text ? (
-            <div className="mt-1 rounded-xl border border-gray-200 bg-gray-50 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-gray-500">پرامپت</span>
-                <CopyButton text={img.prompt_text} />
+          <div className="max-h-[calc(86vh-46px)] overflow-y-auto md:grid md:grid-cols-2">
+            {/* سمتِ عکس. object-contain و نه cover: کاربر برای دیدنِ خودِ تصویر
+                کلیک کرده، پس در این یک جا بریدنش خطاست — حتی اگر ماک ببُرد. */}
+            <div className="px-4 md:py-4">
+              <div className="flex items-center justify-center overflow-hidden rounded-[20px] bg-surface">
+                <Image
+                  src={img.url}
+                  alt={img.title_fa ?? "تصویرِ ساخته‌شده با هوش مصنوعی"}
+                  width={img.width}
+                  height={img.height}
+                  sizes="(max-width: 768px) 100vw, 50vw"
+                  className="max-h-[42vh] w-full object-contain md:max-h-[70vh]"
+                />
               </div>
-              <p
-                dir="ltr"
-                className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-left font-mono text-[13px] leading-relaxed text-gray-800"
-              >
-                {img.prompt_text}
-              </p>
             </div>
-          ) : (
-            <p className="mt-1 text-sm text-gray-400">پرامپتی برای این تصویر ثبت نشده.</p>
-          )}
-        </div>
+
+            {/* سمتِ جزئیات */}
+            <div className="flex min-w-0 flex-col gap-3.5 p-4">
+              {img.title_fa ? (
+                <h2 id={titleId} className="text-[15px] font-bold leading-snug">
+                  {img.title_fa}
+                </h2>
+              ) : null}
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {img.categories.map((c) => (
+                  <span
+                    key={c.slug}
+                    className="rounded-full bg-accent-soft px-2.5 py-[5px] text-[11px] font-bold text-accent"
+                  >
+                    {c.name_fa}
+                  </span>
+                ))}
+                {/* جای نشانِ مدل در ماک. مدل در کلِ محتوا NULL است؛ تاریخ
+                    داده‌ی واقعی است و از xlsx آمده، پس همان اینجا می‌نشیند. */}
+                <span className="rounded-full bg-surface px-2.5 py-[5px] text-[10.5px] font-medium text-muted">
+                  {img.dateFa}
+                </span>
+              </div>
+
+              {img.prompt_text ? (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] font-bold text-faint">متنِ پرامپت</p>
+                    {/* طولِ پرامپت از ۳۹ تا ۴۰۶۱ کاراکتر است. این عدد می‌گوید
+                        کاربر با چه چیزی طرف است، پیش از آنکه اسکرول کند. */}
+                    <p className="text-[10px] text-faint">
+                      {numFa.format(img.prompt_text.length)} کاراکتر
+                    </p>
+                  </div>
+
+                  {/* dir="ltr" اجباری است: متنِ انگلیسی داخلِ صفحه‌ی RTL بدون
+                      این، نقطه و کاماهایش سرِ خط می‌پرند.
+                      نوارِ اسکرول عمداً پنهان نشد (برخلافِ ماک): با پرامپت‌های
+                      تا ۴۰۰۰ کاراکتری، همان نوار تنها نشانه‌ی «ادامه دارد» است. */}
+                  <div
+                    dir="ltr"
+                    className="max-h-40 overflow-y-auto rounded-field border border-line bg-surface text-left"
+                  >
+                    <p className="whitespace-pre-wrap break-words p-3.5 font-mono text-[11px] leading-[1.75] text-ink-code">
+                      {img.prompt_text}
+                    </p>
+                  </div>
+
+                  <CopyButton text={img.prompt_text} size="block" />
+                </>
+              ) : (
+                <p className="text-sm text-faint">پرامپتی برای این تصویر ثبت نشده.</p>
+              )}
+            </div>
+          </div>
+        </motion.div>
       </div>
-    </div>
-  );
-}
-
-/** دکمه‌ی کپی پرامپت با بازخورد «کپی شد» و fallback برای مرورگر/بستر ناامن. */
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const onCopy = useCallback(async () => {
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        // بستر ناامن (http) یا مرورگر قدیمی: fallback با textarea موقت.
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.focus();
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-      }
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // اگر کپی نشد بی‌سر و صدا بگذر؛ کاربر می‌تواند دستی انتخاب/کپی کند.
-    }
-  }, [text]);
-
-  return (
-    <button
-      type="button"
-      onClick={onCopy}
-      className={`rounded-lg px-3 py-1 text-xs font-medium transition-colors ${
-        copied ? "bg-green-100 text-green-700" : "bg-indigo-600 text-white hover:bg-indigo-700"
-      }`}
-    >
-      {copied ? "کپی شد ✓" : "کپی پرامپت"}
-    </button>
+    </>
   );
 }

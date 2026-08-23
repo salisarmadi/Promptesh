@@ -438,6 +438,12 @@ function buildPgConfig(connectionString) {
   return {
     connectionString: url.toString(),
     ssl: isLocal ? false : { rejectUnauthorized: false },
+    // اتصال به دیتابیسِ دور از ایران عمر کوتاهی دارد؛ NAT و فایروالِ میانی
+    // سوکتِ ساکت را می‌بندند. keepAlive بسته‌ی زنده‌نگه‌دار می‌فرستد تا سوکت
+    // در فاصله‌ی بین دو کوئری قطع نشود.
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 5_000,
+    connectionTimeoutMillis: 20_000,
   };
 }
 
@@ -677,97 +683,378 @@ async function writeSkippedLog(skipped, targetPath) {
 // نوشتن در دیتابیس
 // ---------------------------------------------------------------------------
 
-async function importToDatabase(records, opts, projectRoot) {
-  const connectionString = await readDatabaseUrl(projectRoot);
-  const { default: pg } = await import("pg");
-  const client = new pg.Client(buildPgConfig(connectionString));
+/** ستون‌هایی از images که این اسکریپت می‌نویسد؛ اگر یکی نباشد INSERT می‌شکند. */
+const REQUIRED_IMAGE_COLUMNS = ["url", "title_fa", "model_used", "created_at", "width", "height"];
 
-  await client.connect();
-  console.log("به دیتابیس وصل شد.");
+/**
+ * بررسیِ پیش‌پرواز: قبل از هر نوشتنی مطمئن شو اسکیما همان چیزی است که کد
+ * انتظارش را دارد.
+ *
+ * چرا لازم است و چرا نمی‌شود به خطای خودِ INSERT تکیه کرد: مسیرِ جبرانیِ درج
+ * هر ردیف را داخل SAVEPOINT خودش می‌گذارد، پس یک ستونِ غایب به یک خطای روشن
+ * ترجمه نمی‌شد بلکه به ۷۰۰ «خطای ردیف» ترجمه می‌شد که در فایلِ ردشده‌ها دفن
+ * می‌شوند، درحالی‌که خروجیِ ترمینال هنوز خطوطِ «۷۰۰ ردیف خوانده شد» و «تراکنش
+ * COMMIT شد» را نشان می‌دهد. یعنی یک شکستِ کامل، شبیهِ یک اجرای موفق به‌نظر
+ * می‌رسید. این تابع همان حالت را به یک پیامِ صریح با نامِ فایلِ migration
+ * تبدیل می‌کند.
+ */
+async function assertSchemaReady(client) {
+  const res = await client.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'images'`,
+  );
+  const present = new Set(res.rows.map((r) => r.column_name));
 
+  if (present.size === 0) {
+    throw new Error(
+      "جدول images در این دیتابیس وجود ندارد.\n" +
+        "  اول محتوای db/schema.sql را در کنسول SQL اجرا کن، بعد این دستور را بزن.",
+    );
+  }
+
+  const missing = REQUIRED_IMAGE_COLUMNS.filter((c) => !present.has(c));
+  if (missing.length > 0) {
+    throw new Error(
+      `جدول images این ستون‌ها را ندارد: ${missing.join("، ")}\n` +
+        "  یعنی اسکیمای دیتابیس از کد عقب‌تر است. علتش این است که schema.sql با\n" +
+        "  CREATE TABLE IF NOT EXISTS نوشته شده و روی جدولِ موجود بی‌صدا هیچ کاری نمی‌کند.\n" +
+        "  این فایل را در کنسول SQL اجرا کن و بعد همین دستور را دوباره بزن:\n" +
+        "      db/migrations/001-add-image-dimensions.sql\n" +
+        "  (فایل idempotent است؛ اجرای چندباره‌اش بی‌خطر است.)",
+    );
+  }
+}
+
+/**
+ * تعداد ردیف در هر دسته. عمداً کوچک: هدف کمینه‌کردنِ رفت‌وبرگشت نیست، بلکه
+ * کوتاه‌نگه‌داشتنِ عمرِ هر تراکنش است. روی مسیرِ شبکه‌ای که هر چند ده ثانیه
+ * سوکت را می‌کشد، دسته‌ی بزرگ یعنی کارِ بیشتری که با هر قطعی از دست می‌رود.
+ * با ۲۵ ردیف، بزرگ‌ترین دستور ۱۵۰ پارامتر و چند ده کیلوبایت است.
+ */
+const CHUNK_SIZE = 25;
+
+/** چند بار یک واحدِ کار در برابر خطای گذرا تکرار شود. */
+const MAX_ATTEMPTS = 4;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** سوکت مرده است — کلاینت دیگر قابل استفاده نیست و باید از نو ساخته شود. */
+function isConnectionError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /terminated|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|Connection ended|connection error|server closed/i.test(
+    msg,
+  );
+}
+
+/**
+ * خطای گذرا: با تکرار ممکن است جواب بدهد.
+ *
+ * «statement timeout» هم اینجاست و دلیلش تجربی است: اجرای قبلی که وسطِ کار
+ * قطع شد، یک نشستِ زامبی با قفلِ باز جا گذاشت، و TRUNCATE بعدی منتظرِ همان
+ * قفل ماند تا مهلتش تمام شد. آن قفل خودش چند ثانیه بعد آزاد می‌شود.
+ */
+function isRetryable(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return isConnectionError(err) || /statement timeout|deadlock detected|obtain lock/i.test(msg);
+}
+
+/**
+ * یک واحدِ کار را در تراکنشِ خودش اجرا می‌کند و در برابر خطای گذرا تکرار می‌کند
+ * — با ساختنِ اتصالِ تازه، چون کلاینتِ pg بعد از مرگِ سوکت دیگر قابل احیا نیست.
+ *
+ * چرا هر واحد تراکنشِ جدا دارد و نه یک تراکنشِ بزرگ برای همه‌ی ۷۰۰ ردیف:
+ * تراکنشِ بزرگ یعنی «همه یا هیچ»، که روی یک اتصالِ ناپایدار در عمل همیشه
+ * «هیچ» است — سه بار همین اتفاق افتاد. با COMMIT به ازای هر دسته، پیشرفت
+ * ماندگار می‌شود و اجرای بعدی از همان‌جا ادامه می‌دهد. بهایش این است که یک
+ * شکستِ میانی، دیتابیس را نیمه‌پر می‌گذارد؛ جبرانش این است که هر دسته پیش از
+ * نوشتن می‌پرسد کدام ردیف‌ها از قبل هستند، پس اجرای دوباره تکراری نمی‌سازد.
+ */
+async function runStep(ctx, label, fn) {
+  for (let attempt = 1; ; attempt += 1) {
+    const client = await ctx.connect();
+    try {
+      await client.query("BEGIN");
+      const out = await fn(client);
+      await client.query("COMMIT");
+      return out;
+    } catch (err) {
+      if (isConnectionError(err)) {
+        // ROLLBACK روی سوکتِ مرده بی‌معنی است؛ کلاینت را دور می‌ریزیم.
+        await ctx.drop();
+      } else {
+        await client.query("ROLLBACK").catch(() => {});
+      }
+
+      if (!isRetryable(err) || attempt >= MAX_ATTEMPTS) throw err;
+
+      const wait = attempt * 3000;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`  ⟳ ${label} — تلاش ${attempt} نشد (${msg})؛ ${wait / 1000} ثانیه دیگر دوباره.`);
+      await sleep(wait);
+    }
+  }
+}
+
+/**
+ * درجِ یک دسته ردیف با سه دستور، به‌جای ~۵.۶ دستور به ازای هر ردیف.
+ *
+ * چرا این‌قدر مهم است: هر دستور یک رفت‌وبرگشتِ شبکه است. با یک ردیف در هر
+ * دستور، ۷۰۰ عکس می‌شود ~۴۰۰۰ رفت‌وبرگشت روی اتصالی که از ایران به سرورِ دور
+ * می‌رود — هم کند است هم هر تک‌لحظه اختلالِ شبکه کلِ تراکنش را می‌کشد. با
+ * درجِ دسته‌ای، تراکنش چند ثانیه باز است نه چند ده دقیقه.
+ *
+ * بهایش این است که یک ردیفِ خراب کلِ دسته را می‌اندازد. جبرانش در فراخوان
+ * است: دسته‌ی شکست‌خورده ردیف‌به‌ردیف تکرار می‌شود تا فقط خودِ ردیفِ خرابکار
+ * رد شود.
+ */
+async function insertBatch(client, chunk, opts, catId, baseTime) {
+  const imgParams = [];
+  const imgTuples = chunk.map((rec) => {
+    const createdAt = rec.createdAt ?? new Date(baseTime - rec.offsetMinutes * 60_000);
+    const b = imgParams.length;
+    imgParams.push(
+      rec.url,
+      rec.titleFa,
+      opts.model,
+      createdAt,
+      rec.width ?? null,
+      rec.height ?? null,
+    );
+    return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`;
+  });
+
+  const imgRes = await client.query(
+    `INSERT INTO images (url, title_fa, model_used, created_at, width, height)
+     VALUES ${imgTuples.join(", ")}
+     RETURNING id, url`,
+    imgParams,
+  );
+
+  // نگاشت با url و نه با ترتیبِ سطرها: ترتیبِ RETURNING در یک INSERT چندسطری
+  // در عمل همان ترتیبِ VALUES است، ولی هیچ‌جا تضمین نشده. url در این مجموعه
+  // یکتاست (۷۰۰ نامِ فایلِ متمایز و کنترل‌شده)، پس نگاشتِ صریح هم درست است هم
+  // به جزئیاتِ پیاده‌سازیِ Postgres وابسته نیست.
+  const idByUrl = new Map(imgRes.rows.map((r) => [r.url, r.id]));
+  if (idByUrl.size !== chunk.length) {
+    throw new Error(
+      `تعداد id بازگشتی (${idByUrl.size}) با تعداد ردیف‌های دسته (${chunk.length}) نمی‌خواند.`,
+    );
+  }
+
+  const prParams = [];
+  const prTuples = chunk.map((rec) => {
+    const b = prParams.length;
+    prParams.push(idByUrl.get(rec.url), rec.promptText);
+    return `($${b + 1}, $${b + 2})`;
+  });
+  await client.query(
+    `INSERT INTO prompts (image_id, prompt_text) VALUES ${prTuples.join(", ")}`,
+    prParams,
+  );
+
+  const icParams = [];
+  const icTuples = [];
+  for (const rec of chunk) {
+    for (const slug of rec.slugs) {
+      const b = icParams.length;
+      icParams.push(idByUrl.get(rec.url), catId.get(slug));
+      icTuples.push(`($${b + 1}, $${b + 2})`);
+    }
+  }
+  if (icTuples.length > 0) {
+    await client.query(
+      `INSERT INTO image_categories (image_id, category_id)
+       VALUES ${icTuples.join(", ")}
+       ON CONFLICT DO NOTHING`,
+      icParams,
+    );
+  }
+}
+
+/**
+ * مسیرِ گران اما دقیق: هر ردیف داخل SAVEPOINT خودش. فقط وقتی صدا زده می‌شود
+ * که درجِ دسته‌ای شکست خورده باشد، تا معلوم شود کدام ردیف مقصر است و بقیه‌ی
+ * همان دسته از دست نروند.
+ */
+async function insertRowByRow(client, chunk, opts, catId, baseTime) {
   const failures = [];
   let inserted = 0;
 
-  try {
-    await client.query("BEGIN");
-
-    if (opts.reset) {
-      // TRUNCATE با CASCADE و RESTART IDENTITY: هم داده‌های placeholder می‌روند
-      // هم شمارنده‌ی id از ۱ شروع می‌شود. pending_prompts دست‌نخورده می‌ماند.
-      await client.query(
-        "TRUNCATE image_categories, prompts, images, categories RESTART IDENTITY CASCADE",
+  for (const rec of chunk) {
+    await client.query("SAVEPOINT row_sp");
+    try {
+      const createdAt = rec.createdAt ?? new Date(baseTime - rec.offsetMinutes * 60_000);
+      const img = await client.query(
+        `INSERT INTO images (url, title_fa, model_used, created_at, width, height)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [rec.url, rec.titleFa, opts.model, createdAt, rec.width ?? null, rec.height ?? null],
       );
-      console.log("جدول‌های categories/images/prompts/image_categories خالی شدند (۳۰ رکورد تستی رفت).");
-    }
+      const imageId = img.rows[0].id;
 
-    // دسته‌ها را می‌سازد یا نامشان را به‌روز می‌کند و id هرکدام را می‌گیرد.
-    const catId = new Map();
-    for (const { slug, name_fa } of TAXONOMY) {
-      const res = await client.query(
-        `INSERT INTO categories (name_fa, slug) VALUES ($1, $2)
-         ON CONFLICT (slug) DO UPDATE SET name_fa = EXCLUDED.name_fa
-         RETURNING id`,
-        [name_fa, slug],
-      );
-      catId.set(slug, res.rows[0].id);
-    }
-    console.log(`${TAXONOMY.length} دسته‌بندی آماده شد.`);
+      await client.query(`INSERT INTO prompts (image_id, prompt_text) VALUES ($1, $2)`, [
+        imageId,
+        rec.promptText,
+      ]);
 
-    const baseTime = Date.now();
-
-    for (const rec of records) {
-      // SAVEPOINT به ازای هر ردیف: اگر یک ردیف در سطح دیتابیس خطا بدهد، فقط
-      // خودش برمی‌گردد و تراکنش کلی سالم می‌ماند. بدون این، اولین خطا کل
-      // تراکنش را «aborted» می‌کرد و بقیه‌ی ردیف‌ها هم می‌سوختند.
-      await client.query("SAVEPOINT row_sp");
-      try {
-        const createdAt = rec.createdAt ?? new Date(baseTime - rec.offsetMinutes * 60_000);
-        const img = await client.query(
-          `INSERT INTO images (url, title_fa, model_used, created_at, width, height)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-          [rec.url, rec.titleFa, opts.model, createdAt, rec.width ?? null, rec.height ?? null],
+      for (const slug of rec.slugs) {
+        await client.query(
+          `INSERT INTO image_categories (image_id, category_id) VALUES ($1, $2)
+           ON CONFLICT DO NOTHING`,
+          [imageId, catId.get(slug)],
         );
-        const imageId = img.rows[0].id;
-
-        await client.query(`INSERT INTO prompts (image_id, prompt_text) VALUES ($1, $2)`, [
-          imageId,
-          rec.promptText,
-        ]);
-
-        for (const slug of rec.slugs) {
-          await client.query(
-            `INSERT INTO image_categories (image_id, category_id) VALUES ($1, $2)
-             ON CONFLICT DO NOTHING`,
-            [imageId, catId.get(slug)],
-          );
-        }
-
-        await client.query("RELEASE SAVEPOINT row_sp");
-        inserted += 1;
-      } catch (err) {
-        await client.query("ROLLBACK TO SAVEPOINT row_sp");
-        failures.push({
-          rowLabel: rec.rowLabel,
-          csvLine: rec.csvLine,
-          reason: `خطای دیتابیس: ${err instanceof Error ? err.message : String(err)}`,
-          fileName: rec.url,
-          rawCats: rec.slugs.join("، "),
-          titleFa: rec.titleFa ?? "",
-          promptLength: rec.promptText.length,
-        });
       }
-    }
 
-    await client.query("COMMIT");
-    console.log("تراکنش COMMIT شد.");
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    await client.end();
+      await client.query("RELEASE SAVEPOINT row_sp");
+      inserted += 1;
+    } catch (err) {
+      await client.query("ROLLBACK TO SAVEPOINT row_sp");
+      failures.push({
+        rowLabel: rec.rowLabel,
+        csvLine: rec.csvLine,
+        reason: `خطای دیتابیس: ${err instanceof Error ? err.message : String(err)}`,
+        fileName: rec.url,
+        rawCats: rec.slugs.join("، "),
+        titleFa: rec.titleFa ?? "",
+        promptLength: rec.promptText.length,
+      });
+    }
   }
 
   return { inserted, failures };
+}
+
+async function importToDatabase(records, opts, projectRoot) {
+  const connectionString = await readDatabaseUrl(projectRoot);
+  const { default: pg } = await import("pg");
+  const config = buildPgConfig(connectionString);
+
+  // مدیریتِ اتصال: تنبل ساخته می‌شود و بعد از مرگِ سوکت دور ریخته و از نو
+  // ساخته می‌شود. شنونده‌ی 'error' اجباری است — بدونش مرگِ ناگهانیِ سوکت یک
+  // رویدادِ بی‌صاحب است و Node پراسس را با stack trace می‌کشد، بیرون از هر
+  // try/catch، پس هیچ پیامِ قابل‌فهمی چاپ نمی‌شود.
+  let live = null;
+  const ctx = {
+    async connect() {
+      if (live) return live;
+      const c = new pg.Client(config);
+      c.on("error", (err) => console.error(`  ⚠ سوکتِ دیتابیس: ${err.message}`));
+      await c.connect();
+      live = c;
+      return c;
+    },
+    async drop() {
+      const c = live;
+      live = null;
+      if (c) await c.end().catch(() => {});
+    },
+  };
+
+  const failures = [];
+  let inserted = 0;
+  let alreadyPresent = 0;
+
+  try {
+    // ── فاز ۱: اسکیما، خالی‌سازی و دسته‌ها ──────────────────────────────────
+    const catId = await runStep(ctx, "آماده‌سازی", async (client) => {
+      // قبل از TRUNCATE: اگر اسکیما ناقص است، نباید داده‌ی موجود را خالی کنیم
+      // و بعد بفهمیم نمی‌توانیم چیزی بنویسیم.
+      await assertSchemaReady(client);
+
+      if (opts.reset) {
+        // تعداد را قبل از پاک‌کردن می‌شماریم: اگر اجرای قبلی نیمه‌کاره مانده
+        // باشد، --reset همان پیشرفت را دور می‌ریزد و کاربر باید بداند چقدر رفت.
+        const before = await client.query("SELECT count(*)::int AS n FROM images");
+        await client.query(
+          "TRUNCATE image_categories, prompts, images, categories RESTART IDENTITY CASCADE",
+        );
+        console.log(
+          `جدول‌ها خالی شدند (${before.rows[0].n} عکس پاک شد). pending_prompts دست‌نخورده ماند.`,
+        );
+      }
+
+      const map = new Map();
+      for (const { slug, name_fa } of TAXONOMY) {
+        const res = await client.query(
+          `INSERT INTO categories (name_fa, slug) VALUES ($1, $2)
+           ON CONFLICT (slug) DO UPDATE SET name_fa = EXCLUDED.name_fa
+           RETURNING id`,
+          [name_fa, slug],
+        );
+        map.set(slug, res.rows[0].id);
+      }
+      console.log(`${TAXONOMY.length} دسته‌بندی آماده شد.`);
+      return map;
+    });
+
+    // ── فاز ۲: چه چیزی از قبل هست؟ ─────────────────────────────────────────
+    // این همان چیزی است که اجرای دوباره را بی‌خطر می‌کند: بعد از یک قطعیِ
+    // میانی، اجرای بعدی (بدون --reset) از همان‌جا ادامه می‌دهد.
+    const existing = await runStep(ctx, "بازبینی وضعیت", async (client) => {
+      const res = await client.query("SELECT url FROM images");
+      return new Set(res.rows.map((r) => r.url));
+    });
+
+    const todo = records.filter((rec) => !existing.has(rec.url));
+    alreadyPresent = records.length - todo.length;
+
+    if (alreadyPresent > 0) {
+      console.log(
+        `${alreadyPresent} عکس از قبل در دیتابیس بود؛ ${todo.length} ردیف باقی مانده.`,
+      );
+    }
+    if (todo.length === 0) {
+      console.log("چیزی برای اضافه‌کردن نیست — همه‌ی ردیف‌ها از قبل وارد شده‌اند.");
+      return { inserted, alreadyPresent, failures };
+    }
+
+    // ── فاز ۳: درج، دسته‌به‌دسته با COMMIT جداگانه ───────────────────────────
+    const baseTime = Date.now();
+
+    for (let i = 0; i < todo.length; i += CHUNK_SIZE) {
+      const chunk = todo.slice(i, i + CHUNK_SIZE);
+      const label = `دسته‌ی ${i + 1}–${i + chunk.length}`;
+
+      try {
+        inserted += await runStep(ctx, label, async (client) => {
+          // اگر تلاشِ قبلی درست پیش از رسیدنِ تأییدِ COMMIT قطع شده باشد، ممکن
+          // است سرور آن را ثبت کرده باشد. چون images.url قید UNIQUE ندارد،
+          // تکرارِ کورکورانه ردیفِ تکراری می‌ساخت. پس هر دسته اول می‌پرسد.
+          const have = await client.query(
+            `SELECT url FROM images WHERE url = ANY($1::text[])`,
+            [chunk.map((rec) => rec.url)],
+          );
+          const haveSet = new Set(have.rows.map((r) => r.url));
+          const pending = chunk.filter((rec) => !haveSet.has(rec.url));
+          if (pending.length === 0) return 0;
+
+          await insertBatch(client, pending, opts, catId, baseTime);
+          return pending.length;
+        });
+      } catch (err) {
+        // قطعِ اتصال با تکرار حل نشد → ادامه بی‌فایده است. پیشرفتِ تا اینجا
+        // COMMIT شده، پس اجرای بعدی از همین نقطه سوار می‌شود.
+        if (isConnectionError(err)) throw err;
+
+        // خطای داده‌ای: همان دسته را ردیف‌به‌ردیف می‌زنیم تا فقط ردیفِ خرابکار
+        // رد شود و ۲۴ ردیفِ سالمِ دیگر از دست نروند.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`  ⚠ ${label} گروهی نشد (${msg}) — ردیف‌به‌ردیف امتحان می‌شود.`);
+        const r = await runStep(ctx, `${label} ردیف‌به‌ردیف`, (client) =>
+          insertRowByRow(client, chunk, opts, catId, baseTime),
+        );
+        inserted += r.inserted;
+        failures.push(...r.failures);
+      }
+
+      // نشانگرِ پیشرفت. فازِ درج طولانی‌ترین بخشِ کار است و سکوتش باعث می‌شد
+      // اجرای درست هم شبیهِ گیرکردن به‌نظر برسد.
+      console.log(`  ${inserted}/${todo.length}`);
+    }
+  } finally {
+    await ctx.drop();
+  }
+
+  return { inserted, alreadyPresent, failures };
 }
 
 // ---------------------------------------------------------------------------
@@ -804,7 +1091,9 @@ async function main() {
   const raw = await readFile(csvPath, "utf8");
   const rows = parseCsv(raw);
   if (rows.length < 2) throw new Error("فایل CSV هدر یا داده ندارد.");
-  console.log(`خوانده شد: ${rows.length - 1} ردیف داده`);
+  // عمداً صریح می‌گوید «از CSV»: خطِ قبلیِ این پیام فقط «خوانده شد: ۷۰۰ ردیف»
+  // بود و به‌راحتی با «۷۰۰ ردیف در دیتابیس نوشته شد» اشتباه می‌شد.
+  console.log(`از CSV خوانده شد: ${rows.length - 1} ردیف (هنوز چیزی در دیتابیس نوشته نشده)`);
 
   const lookup = new Map(TAXONOMY.map((c) => [normalizeFa(c.name_fa), c.slug]));
   const { records, skipped, warnings, unknownCategories, headerRow } = buildRecords(rows, opts, lookup);
@@ -817,6 +1106,7 @@ async function main() {
   await attachImageSizes(records, projectRoot);
 
   let inserted = 0;
+  let alreadyPresent = 0;
   const allSkipped = [...skipped];
 
   if (opts.dryRun) {
@@ -824,6 +1114,7 @@ async function main() {
   } else {
     const result = await importToDatabase(records, opts, projectRoot);
     inserted = result.inserted;
+    alreadyPresent = result.alreadyPresent;
     allSkipped.push(...result.failures);
   }
 
@@ -836,11 +1127,43 @@ async function main() {
   printSummary({ records, skipped: allSkipped, unknownCategories, dryRun: opts.dryRun, inserted });
 
   if (opts.dryRun) {
-    console.log("\nهیچ چیزی در دیتابیس نوشته نشد. برای ورود واقعی --dry-run را بردار.");
+    console.log("\nهیچ چیزی در دیتابیس نوشته نشده. برای ورود واقعی --dry-run را بردار.");
+    return;
+  }
+
+  // «present» یعنی چند ردیف الان واقعاً در دیتابیس است، نه چند ردیف در همین
+  // اجرا نوشته شد — چون اجرای دوم روی یک import نیمه‌کاره فقط بقیه را می‌نویسد.
+  const present = inserted + alreadyPresent;
+
+  if (present === 0 && records.length > 0) {
+    console.error(
+      `\n✗ هیچ‌کدام از ${records.length} ردیف وارد دیتابیس نشد. این یک اجرای موفق نیست.\n` +
+        `  دلیلِ هر ردیف در ${opts.skipped} نوشته شده — ستونِ «دلیل رد شدن» را ببین.`,
+    );
+    process.exitCode = 1;
+  } else if (present < records.length) {
+    console.error(
+      `\n⚠ ${present} ردیف از ${records.length} در دیتابیس است؛ ${records.length - present} تا مانده.\n` +
+        "  برای ادامه از همین نقطه، همین دستور را بدون --reset اجرا کن:\n" +
+        "      node scripts/import-content.mjs",
+    );
+    process.exitCode = 1;
+  } else {
+    console.log(`\n✓ همه‌ی ${records.length} ردیف در دیتابیس است.`);
   }
 }
 
 main().catch((err) => {
   console.error(`\n✗ اسکریپت متوقف شد: ${err instanceof Error ? err.message : String(err)}`);
+  if (isConnectionError(err)) {
+    console.error(
+      "\n  اتصال به دیتابیس قطع شد و با تکرار هم برنگشت.\n" +
+        "  هرچه تا این لحظه نوشته شده COMMIT شده و سرِ جایش است. برای ادامه از\n" +
+        "  همان نقطه، همین دستور را بدون --reset اجرا کن (وگرنه پیشرفت پاک می‌شود):\n" +
+        "      node scripts/import-content.mjs\n" +
+        "  اگر چند بار پشتِ هم اینجا گیر کرد، مشکل مسیرِ شبکه تا این دیتابیس است،\n" +
+        "  نه داده — بهتر است دیتابیسِ نزدیک‌تر (Liara) را هدف بگیری.",
+    );
+  }
   process.exitCode = 1;
 });

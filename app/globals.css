@@ -1,26 +1,305 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ===========================================================================
+   پرامپتش — توکن‌های طراحی
+   ===========================================================================
+
+   این فایل بازنویسی شد تا دقیقاً با ماکِ design-ref بخواند. سیستمِ قبلی
+   («کاغذِ گرم» + «پلاکِ سرد» + لاجورد و طلا) کنار گذاشته شد؛ نه چون غلط بود،
+   بلکه چون تصمیمِ صاحبِ محصول این است که خروجی همان چیزی باشد که در ماک
+   دیده. نگه‌داشتنِ نصفه‌ی آن سیستم، صفحه را دوتکه می‌کرد.
+
+   همه‌ی مقدارهای زیر از خودِ ماک استخراج شده‌اند، نه از روی چشم:
+     design-ref/AI Image Gallery Website/src/app/App.tsx خط ۲۹ تا ۳۵
+     design-ref/.../components/category-hero.tsx و hero-search.tsx
+
+   قاعده‌ی جدید: یک آبی، یک مرکب، سه خاکستری. هر رنگی خارج از این‌ها باید
+   دلیلِ نوشته‌شده داشته باشد.
+   =========================================================================== */
+
+@theme {
+  /* — سطح‌ها ————————————————————————————————————————
+     زمینه سفیدِ خالص است. عمقِ صفحه از دو واشِ آبیِ بسیار کم‌رنگ و یک
+     دات‌گریدِ ۲۲ پیکسلی می‌آید (پایین‌تر، در body::before)، نه از خاکستری‌کردنِ
+     زمینه. surface تنها سطحِ فرورفته است: دکمه‌ی اینستاگرام، ظرفِ آیکن‌ها. */
+  --color-canvas: #ffffff;
+  --color-surface: #f6f5fb;
+  /* زمینه‌ی جای‌خالیِ عکس تا وقتی بارگذاری شود — از کارت‌های ماک. */
+  --color-surface-image: #f3f2fa;
+
+  /* — مرکب و خاکستری‌ها ————————————————————————————
+     مرکب عمداً خالص‌مشکی نیست؛ #14132B یک سیاهِ کمی بنفش/سرد است که با
+     آبیِ اصلی هم‌خانواده می‌شود. تیترِ هیرو در ماک #0A0A0A است (کمی سیاه‌تر)
+     و همان‌جا با توکنِ ink-title اعمال می‌شود. */
+  --color-ink: #14132b;
+  --color-ink-title: #0a0a0a;
+  --color-muted: #6e6d85;
+  --color-faint: #a5a4b6;
+  /* برچسبِ دسته‌بندیِ غیرفعال در ریلِ هیرو — کمی روشن‌تر از faint. */
+  --color-faint-label: #a1a1af;
+  --color-line: #edecf4;
+  /* متنِ پرامپت داخلِ کادرِ مونواسپیس. از ماک: کمی روشن‌تر از --color-ink، چون
+     متنِ انگلیسیِ مونواسپیس با مرکبِ پرقدرت خیلی سنگین می‌نشیند. */
+  --color-ink-code: #3b3a55;
+
+  /* — آبیِ اصلی ————————————————————————————————————
+     accent تنها رنگِ کنشیِ سایت است: نشانِ لوگو، حلقه‌ی دسته‌بندیِ فعال،
+     نقطه‌ی فعال، حاشیه‌ی فوکوس، و هر دو دکمه‌ی هیرو.
+     accent-soft عمداً از آبیِ دیگری (#4F7FE8) با ۱۰٪ ساخته شده، نه از رقیق‌کردنِ
+     accent؛ همان چیزی است که در ماک است و کمی نرم‌تر می‌نشیند. */
+  --color-accent: #2563eb;
+  --color-accent-strong: #1e40af;
+  --color-accent-soft: rgba(79, 127, 232, 0.1);
+  --color-accent-line: #dbeafe;
+
+  /* نشانِ مدل روی کارت (Flux، Midjourney …). تنها جایی در کلِ سایت که
+     بنفش دیده می‌شود؛ کارش این است که برچسبِ ماشین را از کنشِ کاربر جدا کند. */
+  --color-badge: #5b4fe8;
+
+  /* — وضعیت ————————————————————————————————————————
+     هر دو از ماک: سبزِ «کپی شد» و قرمزِ خطا. قرمزِ قبلی (#8f2320) برای پالتِ
+     گرم انتخاب شده بود و کنار این آبی گِلی به نظر می‌رسید.
+
+     واشِ سبز اینجا نیست و عمداً هم نیست: دکمه‌ی «کپی شد» پرِ سبزِ کامل می‌گیرد
+     نه واشِ کم‌رنگ، پس توکنی که هیچ‌جا استفاده نمی‌شد حذف شد. */
+  --color-affirm: #16a34a;
+  --color-alert: #d4183d;
+  --color-alert-wash: #fdecef;
+
+  /* — قلم ————————————————————————————————————————
+     یکان‌بخ برای فارسی، JetBrains Mono برای متنِ پرامپت.
+
+     وزیرمتن عمداً به‌عنوان فالبکِ دوم مانده و فایل‌هایش هم در public/fonts/
+     هست: تا وقتی فایل‌های یکان‌بخ نرسیده‌اند، سایت با یک قلمِ فارسیِ درست
+     دیده می‌شود نه با Tahoma. وقتی یکان‌بخ آمد، خودبه‌خود جای آن را می‌گیرد
+     و هیچ خطی از کد عوض نمی‌شود. */
+  --font-sans: "Yekan Bakh", Vazirmatn, "Segoe UI", Tahoma, "Iranian Sans", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", "Courier New", monospace;
+
+  /* — گردی گوشه‌ها ————————————————————————————————
+     مقدارها از ماک. کارت در فایلِ فیگما ۲۱٫۷۶۷ پیکسل بود؛ به ۲۲ گرد شد،
+     چون آن عددِ اعشاری فقط ضریبِ مقیاسِ خروجیِ فیگما است و اختلافش
+     زیرِ یک پیکسل است. */
+  --radius-field: 16px;
+  --radius-card: 22px;
+  --radius-pill: 22px;
+  --radius-mark: 20px;
+  --radius-plate: 12px;
+
+  /* — سایه‌ها ————————————————————————————————————————
+     همه از ماک، دست‌نخورده. سایه‌ها اینجا توکن شده‌اند چون در ماک به‌صورت
+     رشته‌ی inline در چند فایل تکرار شده بودند و همان‌جا هم از هم دررفته بودند.
+
+     ⚠️ سایه و گردیِ کارت‌ها و بندانگشتی‌های هیرو اینجا نیستند و عمداً هم
+     نیستند: آن‌ها داخلِ animate موتور حرکت می‌روند و motion رشته‌ی var() را
+     میان‌یابی نمی‌کند. تنها جای تعریفشان app/_components/category-deck.tsx
+     است. اگر اینجا هم می‌بودند، دو منبعِ حقیقت داشتیم که بی‌صدا از هم درمی‌رفت. */
+  --shadow-cta: 0 6px 15px rgba(79, 127, 232, 0.25);
+  --shadow-pill: 0 6px 30px rgba(79, 127, 232, 0.25);
+  --shadow-field: 0 10px 15px rgba(0, 72, 255, 0.05), 0 4px 11.9px rgba(0, 72, 255, 0.15);
+  --shadow-field-focus: 0 10px 15px rgba(0, 72, 255, 0.09), 0 4px 11.9px rgba(0, 72, 255, 0.22);
+  /* چیپِ دسته‌ی فعال. پخشِ منفی یعنی سایه از خودِ چیپ کوچک‌تر است و زیرش
+     می‌نشیند، نه دورش — همین چیپِ فعال را «بالا آمده» نشان می‌دهد. */
+  --shadow-chip: 0 6px 16px -8px rgba(37, 99, 235, 0.7);
+  /* کارتِ گرید. تیره و بسیار پخش‌منفی: کارت‌ها حاشیه ندارند و تنها چیزی که
+     آن‌ها را از زمینه‌ی سفید جدا می‌کند همین است. */
+  --shadow-card: 0 8px 20px -14px rgba(20, 19, 43, 0.5);
+  /* مودال. جهتِ منفیِ Y عمدی است: روی موبایل مودال از پایین می‌آید، پس سایه
+     باید به سمتِ بالا (به سمتِ صفحه) پخش شود، نه زیرِ لبه‌ی پایینیِ نامرئی. */
+  --shadow-modal: 0 -18px 60px -20px rgba(20, 19, 43, 0.5);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* ---------------------------------------------------------------------------
+   قلم‌ها — میزبانی محلی
+   ---------------------------------------------------------------------------
+   یکان‌بخ — چهار فایلِ موجود در public/fonts/ و وزنی که به آن نسبت داده شده:
+
+       YekanBakhFaNum-Regular.woff2      → وزن ۴۰۰ (متنِ عادی)
+       YekanBakhFaNum-SemiBold.woff2     → وزن ۶۰۰ (تیتر، برچسبِ فعال)
+       YekanBakhFaNum-Bold.woff2         → وزن ۷۰۰ (دکمه‌ی گالری)
+       YekanBakhFaNum-ExtraBold.woff2    → وزن ۸۰۰ (واژه‌ی «پرامپتِش» در تیتر)
+
+   نسخه‌ی FaNum است، یعنی رقم‌های لاتینِ 0-9 را هم با شکلِ فارسی می‌کشد. اینجا
+   بی‌خطر است: رقم‌های رابط را از قبل با Intl به کدپوینتِ فارسی تبدیل می‌کنیم،
+   و رقم‌هایی که باید لاتین بمانند (متنِ پرامپت، نامِ مدل) داخلِ پلاک‌اند و با
+   --font-mono رندر می‌شوند، نه با این قلم.
+
+   چرا @font-face و نه next/font/local: با next/font، اگر فایلی سرِ جایش نباشد
+   خودِ dev server بالا نمی‌آید. این روش نبودنِ فایل را به یک برگشتِ بی‌صدا به
+   وزیرمتن تبدیل می‌کند، نه به خوابیدنِ سایت.
+   ⚠️ TODO — قبل از لانچ: به next/font/local مهاجرت کن. مزیتش preload خودکار
+   و نبودِ پرشِ چیدمان هنگام تعویضِ قلم است. حالا که هر نه فایل سرِ جایش است،
+   هزینه‌ی این مهاجرت صفر است.
+
+   font-display: swap — متن بلافاصله دیده می‌شود و بعد قلمش عوض می‌شود؛
+   بهتر از متنِ نامرئی، مخصوصاً روی اتصالِ کند.
+   --------------------------------------------------------------------------- */
+@font-face {
+  font-family: "Yekan Bakh";
+  src: url("/fonts/YekanBakhFaNum-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Yekan Bakh";
+  src: url("/fonts/YekanBakhFaNum-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Yekan Bakh";
+  src: url("/fonts/YekanBakhFaNum-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Yekan Bakh";
+  src: url("/fonts/YekanBakhFaNum-ExtraBold.woff2") format("woff2");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* وزیرمتن — فالبک. فایل‌هایش از node_modules/vazirmatn کپی شده و در repo هست. */
+@font-face {
+  font-family: Vazirmatn;
+  src: url("/fonts/Vazirmatn-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: Vazirmatn;
+  src: url("/fonts/Vazirmatn-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: Vazirmatn;
+  src: url("/fonts/Vazirmatn-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: Vazirmatn;
+  src: url("/fonts/Vazirmatn-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: Vazirmatn;
+  src: url("/fonts/Vazirmatn-ExtraBold.woff2") format("woff2");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ---------------------------------------------------------------------------
+   پایه
+   --------------------------------------------------------------------------- */
+html {
+  color-scheme: light;
+  /* رنگِ زمینه روی html است نه body — توضیحش در body::before پایین‌تر. */
+  background-color: var(--color-canvas);
+  /* لنگرِ اسکرول برای هدرِ چسبان: با کلیک روی لینکِ لنگری، تیتر زیرِ هدر گم نشود. */
+  scroll-padding-top: 5rem;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: transparent;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  /* tabular برای شمارنده‌ها جلوی لرزشِ عرض را می‌گیرد. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* بافتِ زمینه: دو واشِ آبیِ بسیار کم‌رنگ + دات‌گریدِ ۲۲ پیکسلی.
+   عیناً از ماک (App.tsx خط ۷۵۵).
+
+   چرا ::before و نه یک <div> مثل ماک: این یک تزئینِ خالص است و جایش در CSS
+   است نه در درختِ DOM؛ این‌طور در هیچ کامپوننتی دیده نمی‌شود و از قلمِ
+   screen reader هم بیرون می‌ماند.
+
+   ⚠️ z-index: -1 کار می‌کند چون body هیچ stacking context نمی‌سازد. اگر روزی
+   روی body یک transform یا opacity یا isolation گذاشتی، این لایه می‌آید
+   روی محتوا و صفحه مه‌آلود می‌شود. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(ellipse at 88% -4%, rgba(222, 236, 250, 0.85) 0%, transparent 46%),
+    radial-gradient(ellipse at 6% 32%, rgba(236, 242, 252, 0.6) 0%, transparent 40%),
+    radial-gradient(circle, rgba(20, 19, 43, 0.035) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    22px 22px;
+}
+
+/* فارسی با tracking منفی بد جوش می‌خورد، پس پیش‌فرض صفر است. تنها استثنا
+   نشانِ متنیِ «پرامپتِش» در هدر است که در ماک -0.4px دارد.
+
+   ⚠️ چرا داخل @layer base: قاعده‌ی بی‌لایه در CSS از هر قاعده‌ی داخلِ لایه
+   قوی‌تر است — بی‌توجه به specificity. اگر این بلوک بی‌لایه بماند، هیچ کلاسِ
+   tracking-* تِیلویند در کلِ سایت کار نمی‌کند و هیچ خطایی هم نمی‌دهد. با
+   بردنش به base، لایه‌ی utilities (که بعد از base می‌آید) می‌تواند بازنویسی‌اش
+   کند. همین قاعده برای هر چیزی که در آینده اینجا اضافه می‌شود صادق است. */
+@layer base {
+  :lang(fa) {
+    letter-spacing: 0;
+  }
+}
+
+/* حلقه‌ی فوکوسِ دیدنی و یکدست — کفِ کیفیتِ دسترسی‌پذیری.
+   :focus-visible یعنی فقط برای کیبورد، نه کلیکِ موس. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* احترام به «کاهش حرکت». علاوه بر این، انیمیشن‌های motion هم باید با
+   useReducedMotion خاموش شوند؛ این بلوک فقط انیمیشنِ CSS را می‌گیرد. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   کمکی‌ها
+   ---------------------------------------------------------------------------
+   داخل @layer components و نه بی‌لایه، به همان دلیلِ بالا: یک کلاسِ بی‌لایه از
+   تمامِ کلاس‌های تِیلویند قوی‌تر است، پس «rail px-4» بی‌صدا بی‌اثر می‌شد. با
+   components، هر utility می‌تواند رویش بنویسد.
+
+   تنها یک کلاسِ کمکی باقی مانده. کلاسِ «plate» (ظرفِ متنِ ماشین) حذف شد: با
+   پالتِ جدید، متنِ پرامپت روی خودِ عکس یا در کادرِ surface می‌نشیند و هر دو
+   جا کلاس‌هایشان صریح نوشته شده‌اند. یک کلاسِ سراسری برای دو کاربرد، فقط یک
+   منبعِ حقیقتِ دوم می‌ساخت.
+   --------------------------------------------------------------------------- */
+@layer components {
+  /* نوار اسکرولِ افقیِ بی‌میله — برای ریلِ دسته‌بندی‌ها و ردیفِ چیپ‌ها. */
+  .rail {
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .rail::-webkit-scrollbar {
+    display: none;
+  }
 }

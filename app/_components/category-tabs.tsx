@@ -1,17 +1,28 @@
 import Link from "next/link";
 import type { CategoryWithCount } from "@/lib/gallery";
+import { galleryHref } from "@/lib/urls";
 
 /**
- * تب‌های فیلتر دسته‌بندی بالای گالری. (کامپوننت سرور — بدون state کلاینتی)
+ * ردیفِ فیلترِ دسته — تک‌انتخابی، سمتِ سرور، بدون هیچ state کلاینتی.
  *
- * چرا سرور و نه کلاینت؟ هر تب فقط یک <Link> است که searchParams را عوض می‌کند
- * (/?category=couple). خودِ صفحه دوباره سمت سرور رندر می‌شود و گرید فیلترشده
- * می‌آید. مزیت‌ها: URL قابل‌اشتراک، بدون جاوااسکریپت هم کار می‌کند، prefetch
- * خودکار، و «تبِ فعال» از روی همان slugِ فعلی مشخص می‌شود نه از state.
+ * <Link> و نه onClick: وضعیتِ فیلتر در URL است، پس دکمه‌ی بازگشت کار می‌کند،
+ * لینکِ «گالریِ پرتره» قابل‌فرستادن است، و این کامپوننت هیچ جاواسکریپتی به
+ * مرورگر نمی‌فرستد.
  *
- * چرا searchParams و نه مسیر /category/[slug]؟ کم‌فایل‌ترین راه برای MVP و
- * نگه‌داشتن صفحه‌ی اصلی به‌صورت یک صفحه. مسیرِ اختصاصیِ سئو-محور بعداً (کنار
- * کار /image/[id]) اضافه می‌شود.
+ * scroll={false}: با عوض‌کردن دسته، صفحه نباید به بالا بپرد؛ کاربر دارد
+ * فیلترها را مقایسه می‌کند و پرشِ اسکرول جایش را گم می‌کند.
+ *
+ * نکته‌ی مهم: عبارتِ جستجو از galleryHref همراه لینک می‌رود. اگر نمی‌رفت،
+ * کاربری که «bokeh» را جستجو کرده و بعد روی «پرتره» می‌زند، بی‌خبر جستجویش را
+ * از دست می‌داد.
+ *
+ * ── تغییرها نسبت به نسخه‌ی قبل ──
+ * • نقطه‌ی طلاییِ کنارِ دسته‌ی فعال حذف شد. در ماک هیچ طلایی وجود ندارد و آن
+ *   نقطه امضای پالتِ قدیمی بود. کارِ اطلاع‌رسانی‌اش را از قبل هم aria-current و
+ *   کنتراستِ پرِ آبی انجام می‌دادند، پس چیزی از دست نرفت.
+ * • شمارِ عکس‌ها ماند، هرچند در ماک نیست: با ۶۲۴ عکس در «پرتره» و ۴ عکس در
+ *   «گروهی»، همین عدد تنها چیزی است که به کاربر می‌گوید کدام دسته ارزشِ زدن
+ *   دارد. حذفش برای شبیه‌شدن به ماک، یک دادهٔ واقعی را قربانیِ ظاهر می‌کرد.
  */
 
 const numFa = new Intl.NumberFormat("fa-IR");
@@ -19,62 +30,65 @@ const numFa = new Intl.NumberFormat("fa-IR");
 export function CategoryTabs({
   categories,
   activeSlug,
+  query,
+  totalCount,
 }: {
   categories: CategoryWithCount[];
-  /** slugِ دستهٔ فعال، یا null یعنی تبِ «همه». */
   activeSlug: string | null;
+  /** عبارتِ جستجوی فعال — حفظ می‌شود. */
+  query: string;
+  /** تعدادِ کلِ عکس‌ها با جستجوی فعلی و بدون فیلترِ دسته — شمارِ چیپِ «همه». */
+  totalCount: number;
 }) {
   return (
-    // منفی‌حاشیه‌ها اجازه می‌دهند نوار تب‌ها روی موبایل تا لبه‌ی صفحه اسکرول شود.
-    <nav aria-label="فیلتر دسته‌بندی" className="mb-5 -mx-4 sm:mx-0">
-      <ul className="flex gap-2 overflow-x-auto px-4 pb-1 sm:px-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <li>
-          <TabLink href="/" label="همه" active={activeSlug === null} />
-        </li>
-        {categories.map((c) => (
-          <li key={c.slug}>
-            <TabLink
-              href={`/?category=${c.slug}`}
-              label={c.name_fa}
-              count={c.image_count}
-              active={activeSlug === c.slug}
-            />
-          </li>
-        ))}
-      </ul>
+    <nav aria-label="فیلتر دسته‌بندی" className="rail flex gap-2 py-1">
+      <Chip href={galleryHref({ q: query })} isActive={activeSlug === null} count={totalCount}>
+        همه
+      </Chip>
+
+      {categories.map((c) => (
+        <Chip
+          key={c.slug}
+          href={galleryHref({ category: c.slug, q: query })}
+          isActive={activeSlug === c.slug}
+          count={c.image_count}
+        >
+          {c.name_fa}
+        </Chip>
+      ))}
     </nav>
   );
 }
 
-function TabLink({
+function Chip({
   href,
-  label,
+  isActive,
   count,
-  active,
+  children,
 }: {
   href: string;
-  label: string;
-  count?: number;
-  active: boolean;
+  isActive: boolean;
+  count: number;
+  children: React.ReactNode;
 }) {
   return (
     <Link
       href={href}
-      // scroll={false}: با عوض‌شدن تب، صفحه به بالا نپرد؛ کاربر جای خودش بماند.
       scroll={false}
-      aria-current={active ? "page" : undefined}
-      className={`flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-sm font-medium transition-colors ${
-        active
-          ? "border-indigo-600 bg-indigo-600 text-white"
-          : "border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:text-gray-900"
+      // aria-current تنها راهی است که کاربرِ اسکرین‌ریدر بفهمد کدام فیلتر فعال
+      // است؛ رنگِ پس‌زمینه برای او وجود ندارد.
+      aria-current={isActive ? "page" : undefined}
+      /* اندازه‌ها از ماک: ۱۲ پیکسل متن، ارتفاعِ کمینه‌ی ۳۴، پرِ ۷×۱۵.
+         min-h-[34px] لازم است چون چیپِ فعال وزنِ ۷۰۰ می‌گیرد و بدون ارتفاعِ
+         کمینه، ردیف با هر انتخاب یک پیکسل بالا و پایین می‌پرید. */
+      className={`flex min-h-[34px] shrink-0 items-center gap-2 rounded-full border px-[15px] py-[7px] text-xs transition-colors ${
+        isActive
+          ? "border-accent bg-accent font-bold text-white shadow-chip"
+          : "border-line bg-canvas font-medium text-muted hover:border-accent/40 hover:text-accent"
       }`}
     >
-      <span>{label}</span>
-      {typeof count === "number" ? (
-        <span className={`text-xs tabular-nums ${active ? "text-indigo-200" : "text-gray-400"}`}>
-          {numFa.format(count)}
-        </span>
-      ) : null}
+      <span>{children}</span>
+      <span className={isActive ? "text-white/70" : "text-faint"}>{numFa.format(count)}</span>
     </Link>
   );
 }
