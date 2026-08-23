@@ -27,10 +27,33 @@ export function Hero({ decks }: { decks: HeroDeck[] }) {
           پیدا نمی‌کند — و تیترِ صفحه‌ی اصلی مهم‌ترین جای سایت برای جستجوی نامِ
           برند است. کسره (ِ) اما یک نشانه‌ی ترکیبی است که موتورهای جستجو
           نرمال‌سازی می‌کنند، پس هم می‌ماند و هم تلفظِ درست را می‌رساند. */}
+      
       <h1 className="pb-2 pt-6 text-center leading-[1.53] text-ink-title md:pt-10">
-        <span className="text-[24.8px] font-medium md:text-[34px]">هرچــــی که لازم داری، </span>
+        <span className="block text-[28px] font-medium md:text-[38px]">
+        هرچــــی که لازم داری،
+       </span>
+
+       <span
+        className="block text-[36px] font-extrabold md:text-[48px]"
+         style={{
+         backgroundImage:
+        "linear-gradient(to bottom, #0066FF 0%, #0054D3 50%, #6DA8FF 93.75%)",
+      WebkitBackgroundClip: "text",
+      backgroundClip: "text",
+      color: "transparent",
+    }}
+  >
+    پرامپتِش
+    <span className="text-[28px] font-medium text-ink-title md:text-[38px]">
+      {" "}اینجاس
+      </span>
+     </span>
+       </h1> 
+      
+      {/* <h1 className="pb-2 pt-6 text-center leading-[1.53] text-ink-title md:pt-10">
+        <span className="text-[28px] font-medium md:text-[38px]">هرچــــی که لازم داری، </span>
         <span
-          className="text-[31.8px] font-extrabold md:text-[44px]"
+          className="text-[36px] font-extrabold md:text-[47px]"
           style={{
             backgroundImage:
               "linear-gradient(to bottom, #0066FF 0%, #0054D3 50%, #6DA8FF 93.75%)",
@@ -41,8 +64,10 @@ export function Hero({ decks }: { decks: HeroDeck[] }) {
         >
           پرامپتِش
         </span>
-        <span className="text-[24.8px] font-medium md:text-[34px]"> اینجاس</span>
-      </h1>
+          <span className="text-[28px] font-medium md:text-[38px]">
+          {" "}اینجاس
+          </span>
+      </h1> */}
 
       {/* ── ریل و دستِ کارت‌ها ───────────────────────────────────────
           مقیاسِ ۱٫۲ در دسکتاپ با transform انجام می‌شود و نه با بزرگ‌کردنِ
