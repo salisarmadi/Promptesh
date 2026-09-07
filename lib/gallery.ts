@@ -167,8 +167,22 @@ function toLikePattern(raw: string): string | null {
  * چرا مشترک؟ چون اگر شمارش و فهرست دو منطق فیلتر جدا داشته باشند، دیر یا زود
  * از هم واگرا می‌شوند و صفحه عددی نشان می‌دهد که با کارت‌های روی صفحه نمی‌خواند.
  * پارامترها هم برمی‌گردند تا شماره‌گذاری $n در هر دو کوئری یکی باشد.
+ *
+ * ── چرا export شده ──
+ * پنلِ مدیریت (lib/admin/images.ts) به دقیقاً همین معناهای فیلتر نیاز دارد:
+ * همان یکسان‌سازیِ «ي/ك/نیم‌فاصله»، همان escapeِ الگوی LIKE، و همان فیلترِ
+ * دسته با EXISTS. نوشتنِ دوباره‌شان در پنل یعنی دو تعریفِ «جستجو» در پروژه که
+ * بی‌صدا از هم دور می‌شوند — مدیر با «پرتره» ۶۲۴ نتیجه ببیند و بازدیدکننده
+ * ۶۲۰. پس همین یکی مرجع می‌ماند و پنل رویش *می‌افزاید*.
+ *
+ * ⚠️ قاعده‌ی افزودن: مصرف‌کننده می‌تواند به هر دو آرایه اضافه کند، ولی شماره‌ی
+ *    پارامترِ تازه باید همیشه از params.length گرفته شود (نه یک عددِ ثابت)،
+ *    وگرنه با تغییرِ فیلترهای این تابع، جای $n در کوئریِ پنل می‌لنگد.
+ *
+ * ⚠️ شرط‌ها به نامِ مستعارِ `i` برای جدولِ images وابسته‌اند. هر کوئریِ تازه‌ای
+ *    که این‌ها را مصرف می‌کند باید همان alias را داشته باشد.
  */
-function buildFilter(opts: GetGalleryImagesOptions): {
+export function buildFilter(opts: GetGalleryImagesOptions): {
   conditions: string[];
   params: unknown[];
 } {
@@ -221,9 +235,10 @@ function buildFilter(opts: GetGalleryImagesOptions): {
  *
  * چرا جدا از buildFilter؟ چون همین شرط‌ها در getCategories نه در WHERE بلکه در
  * ON یک LEFT JOIN می‌نشینند؛ اگر buildFilter خودش WHERE بچسباند، آنجا قابل
- * استفاده نیست.
+ * استفاده نیست. (به همین دلیل هم export شده: پنل شرط‌های خودش را به آرایه
+ * اضافه می‌کند و بعد همین تابع را صدا می‌زند.)
  */
-function whereClause(conditions: string[]): string {
+export function whereClause(conditions: string[]): string {
   return conditions.length > 0 ? `\n     WHERE ${conditions.join("\n       AND ")}` : "";
 }
 
@@ -299,6 +314,54 @@ export const getGalleryImages = cache(async function getGalleryImages(
 });
 
 /**
+ * یک عکس با شناسه‌اش — منبعِ صفحه‌ی /image/[id] و مودالِ رهگیرش.
+ *
+ * چرا تابعِ جدا و نه getGalleryImages با فیلترِ id؟ چون آن تابع فیلترِ id ندارد و
+ * اضافه‌کردنش یعنی دست‌زدن به کوئری‌ای که کلِ گالری رویش سوار است. این کوئری
+ * همان SELECTِ آن است (تا هر دو مسیر دقیقاً یک شکلِ داده بدهند) ولی با
+ * WHERE i.id و بدون ORDER BY/LIMIT.
+ *
+ * ⚠️ id باید پیش از رسیدن به اینجا از parseImageId گذشته باشد. اینجا مستقیم
+ * پارامتر می‌رود (تزریق ممکن نیست) ولی مقدارِ غیرعددی '12a'::bigint را
+ * می‌شکاند: خطای 22P02، که به‌جای ۴۰۴ می‌شود ۵۰۰. اعتبارسنجی در lib/urls.ts
+ * است تا هم مسیرِ صفحه و هم هر مصرف‌کننده‌ی دیگری یک تعریف داشته باشند.
+ *
+ * نکته‌ی cache: برخلافِ هشدارِ بالای همین فایل، اینجا React.cache واقعاً اصابت
+ * می‌کند — چون آرگومان یک رشته است و برابریِ ارجاعیِ رشته همان برابریِ مقداری
+ * است. پس صداکردنش هم در generateMetadata و هم در خودِ صفحه یک کوئری است، نه دو.
+ * (دلیلِ اصابت‌نکردن در بقیه‌ی توابع، آبجکتِ تازه در هر صداکردن است.)
+ */
+export const getGalleryImage = cache(async function getGalleryImage(
+  id: string
+): Promise<GalleryImage | null> {
+  const rows = await query<GalleryImage>(
+    `SELECT i.id,
+            i.url,
+            i.title_fa,
+            i.model_used,
+            i.likes_count,
+            i.created_at,
+            i.width,
+            i.height,
+            (SELECT p.prompt_text FROM prompts p WHERE p.image_id = i.id) AS prompt_text,
+            COALESCE(
+              json_agg(
+                json_build_object('slug', c.slug, 'name_fa', c.name_fa)
+                ORDER BY c.name_fa
+              ) FILTER (WHERE c.id IS NOT NULL),
+              '[]'::json
+            ) AS categories
+       FROM images i
+       LEFT JOIN image_categories ic ON ic.image_id = i.id
+       LEFT JOIN categories c ON c.id = ic.category_id
+      WHERE i.id = $1::bigint
+      GROUP BY i.id`,
+    [id]
+  );
+  return rows[0] ?? null;
+});
+
+/**
  * تعداد کلِ عکس‌هایی که با فیلترِ فعلی می‌خوانند — بدون limit.
  *
  * چرا لازم است: getGalleryImages سقفِ limit دارد (پیش‌فرض ۶۰). اگر صفحه
@@ -353,6 +416,138 @@ export const getCategories = cache(async function getCategories(
       ORDER BY count(i.id) DESC, c.name_fa`,
     params
   );
+});
+
+/**
+ * دسته به‌همراه توضیحِ اختیاری‌اش — فقط صفحه‌ی دسته این را لازم دارد.
+ *
+ * ⚠️ عمداً روی CategoryWithCount سوار شده و جایگزینش نشده: چیپ‌های گالری با
+ * یازده ردیف کوئری می‌شوند و توضیح را نشان نمی‌دهند، پس کشیدنِ آن ستون در آن
+ * مسیر فقط هزینه است.
+ */
+export type CategoryDetail = CategoryWithCount & {
+  description: string | null;
+};
+
+/**
+ * یک دسته با slugش — منبعِ متادیتای صفحه‌ی /category/[slug].
+ *
+ * چرا تابعِ جدا و نه پیدا‌کردنش در خروجیِ getCategories: صفحه‌ی دسته در
+ * generateMetadata به نامِ فارسی و توضیحِ دسته نیاز دارد، و getCategories آرگومانِ
+ * آبجکتی دارد که React.cache رویش هیچ‌وقت اصابت نمی‌کند (بالای همین فایل). پس
+ * صداکردنش در متا یعنی کوئریِ یازده‌ردیفیِ دسته‌ها دو بار اجرا شود. این کوئری
+ * یک ردیف با ایندکسِ UNIQUE برمی‌گرداند و آرگومانش رشته است، پس cache واقعاً
+ * اصابت می‌کند.
+ *
+ * description از migration 002 می‌آید و در گالری استفاده نمی‌شود؛ خودِ اسکیما
+ * می‌گوید «در صورت نیاز برای سئوی صفحه دسته» — که دقیقاً همین‌جاست.
+ *
+ * count(ic.image_id) بی‌واسطه از جدولِ واسط می‌شمارد و نه با JOIN به images
+ * (کاری که getCategories می‌کند): کلیدِ اصلیِ (image_id, category_id) جفتِ
+ * تکراری را غیرممکن کرده و FK با CASCADE ردیفِ یتیم نمی‌گذارد، پس دو عدد یکی‌اند
+ * و این یکی یک JOIN کمتر دارد.
+ *
+ * ⚠️ image_count عمداً فیلترِ جستجو ندارد. این عدد در متادیتا می‌آید، یعنی وصفِ
+ * خودِ دسته است و نباید با تایپِ کاربر در ?q= عوض شود. عددِ هم‌خوان با نتیجه‌ی
+ * روی صفحه از countGalleryImages می‌آید.
+ *
+ * ⚠️ slug باید پیش از رسیدن به اینجا از parseCategorySlug گذشته باشد. اینجا
+ * پارامتری می‌رود پس تزریق ممکن نیست، ولی اعتبارسنجیِ زودهنگام یک ۴۰۴ ارزان
+ * است به‌جای یک رفت‌وبرگشتِ بی‌جواب به دیتابیس.
+ */
+export const getCategoryBySlug = cache(async function getCategoryBySlug(
+  slug: string
+): Promise<CategoryDetail | null> {
+  const rows = await query<CategoryDetail>(
+    `SELECT c.slug,
+            c.name_fa,
+            c.description,
+            count(ic.image_id)::int AS image_count
+       FROM categories c
+       LEFT JOIN image_categories ic ON ic.category_id = c.id
+      WHERE c.slug = $1
+      GROUP BY c.id, c.slug, c.name_fa, c.description`,
+    [slug]
+  );
+  return rows[0] ?? null;
+});
+
+/**
+ * ------------------------------ sitemap ------------------------------
+ *
+ * هر چیزی که app/sitemap.ts برای ساختنِ فهرستِ آدرس‌ها لازم دارد.
+ *
+ * ⚠️ عمداً مسیر برنمی‌گرداند، فقط شناسه و slug و تاریخ. شکلِ آدرس فقط در
+ * lib/urls.ts تعریف می‌شود و sitemap.ts خودش خروجیِ اینجا را از imageHref و
+ * galleryHref می‌گذراند. اگر این فایل مسیر می‌ساخت، دو جا شکلِ آدرس را
+ * می‌دانستند و روزی که «/image/<id>» عوض شود یکی‌شان جا می‌ماند.
+ */
+export type SitemapTargets = {
+  /**
+   * آخرین تغییر در کلِ گالری — lastmod صفحه‌ی اصلی. null یعنی هیچ عکسی نیست.
+   */
+  latest: Date | null;
+  /** دسته‌هایی که دست‌کم یک عکس دارند. */
+  categories: Array<{ slug: string; last_modified: Date }>;
+  /** عکس‌هایی که صفحه‌شان قابلِ فهرست‌شدن است — پایین را بخوان. */
+  images: Array<{ id: string; last_modified: Date }>;
+};
+
+/**
+ * آدرس‌های واردشدنی به sitemap.
+ *
+ * ── ⚠️ چرا عکس‌ها JOIN به prompts دارند ──
+ * صفحه‌ی /image/[id] برای عکسِ بی‌پرامپت خودش noindex می‌گذارد (شرطِ
+ * img.prompt_text در generateMetadataِ آن صفحه). آدرسی که در sitemap «لطفاً
+ * فهرست کن» می‌گیرد و در خودِ صفحه «فهرست نکن»، دو سیگنالِ متناقض است که
+ * Search Console به‌عنوان خطا گزارشش می‌کند («Submitted URL marked noindex») و
+ * اعتمادِ کلِ sitemap را پایین می‌آورد. پس شرطِ ورود همان شرطِ index است.
+ * ⚠️ اگر روزی آن شرط در صفحه عوض شد، این JOIN هم باید عوض شود.
+ * INNER JOIN ردیف را تکثیر نمی‌کند چون prompts.image_id یونیک است (رابطه‌ی ۱:۱).
+ *
+ * ── چرا دسته‌ها JOIN و نه LEFT JOIN ──
+ * دسته‌ی بی‌عکس صفحه‌ای با کدِ ۲۰۰ دارد که فقط «هنوز عکسی نیست» می‌گوید.
+ * فرستادنِ آن به گوگل یعنی دعوت به ارزیابیِ «محتوای نازک»؛ تا پر شدنش بیرون
+ * می‌ماند. lastmodش هم NULL می‌شد و چیزی برای گفتن نداشتیم.
+ *
+ * ── چرا coalesce(updated_at, created_at) ──
+ * updated_at در اسکیما nullable است و فقط با ویرایش پر می‌شود، پس برای عکسی که
+ * هیچ‌وقت ویرایش نشده NULL است. lastmod خالی یا غلط بدتر از نبودنش است: گوگل
+ * تاریخِ بی‌اعتبار را در کلِ فایل نادیده می‌گیرد.
+ *
+ * ── چرا سه کوئری و نه دو ──
+ * latest از images[0] قابلِ استخراج نیست: آن فهرست فیلترِ prompts دارد، پس اگر
+ * تازه‌ترین عکس هنوز پرامپت نداشته باشد، lastmodِ صفحه‌ی اصلی عقب‌تر از واقعیت
+ * می‌شد — درحالی‌که خودِ صفحه‌ی اصلی آن عکس را نشان می‌دهد. یک aggregate روی
+ * یک ستون هزینه‌ای ندارد.
+ */
+export const getSitemapTargets = cache(async function getSitemapTargets(): Promise<SitemapTargets> {
+  const [latestRows, categories, images] = await Promise.all([
+    query<{ last_modified: Date | null }>(
+      `SELECT max(coalesce(i.updated_at, i.created_at)) AS last_modified
+         FROM images i`
+    ),
+    query<{ slug: string; last_modified: Date }>(
+      `SELECT c.slug,
+              max(coalesce(i.updated_at, i.created_at)) AS last_modified
+         FROM categories c
+         JOIN image_categories ic ON ic.category_id = c.id
+         JOIN images i ON i.id = ic.image_id
+        GROUP BY c.id, c.slug
+        ORDER BY c.slug`
+    ),
+    // ترتیب: تازه‌ترین اول. sitemap ترتیب‌پذیر نیست، ولی وقتی روزی از ۵۰٬۰۰۰
+    // آدرس گذشتیم و ناچار به تکه‌کردن شدیم، تکه‌ی اول باید مهم‌ترین‌ها باشد.
+    query<{ id: string; last_modified: Date }>(
+      `SELECT i.id,
+              coalesce(i.updated_at, i.created_at) AS last_modified
+         FROM images i
+         JOIN prompts p ON p.image_id = i.id
+        ORDER BY coalesce(i.updated_at, i.created_at) DESC, i.id DESC`
+    ),
+  ]);
+
+  return { latest: latestRows[0]?.last_modified ?? null, categories, images };
 });
 
 /**

@@ -35,6 +35,15 @@ export class DatabaseConfigError extends Error {
   }
 }
 
+export class DatabaseConnectionError extends Error {
+  code = "EACCES";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "DatabaseConnectionError";
+  }
+}
+
 /**
  * آیا این خطا به‌خاطر تنظیم‌نشدن یا placeholder بودن DATABASE_URL است؟
  * (بررسی name هم هست تا اگر خطا از مرز سریالایز رد شده و instanceof را از دست
@@ -77,6 +86,29 @@ export function isUndefinedColumnError(err: unknown): boolean {
   );
 }
 
+export function isDatabaseConnectionError(err: unknown): boolean {
+  if (err instanceof DatabaseConnectionError) return true;
+  if (typeof err !== "object" || err === null) return false;
+
+  if (err instanceof AggregateError) return true;
+
+  const code = (err as { code?: string }).code;
+  const message = err instanceof Error ? err.message : "";
+  if (
+    code === "EACCES" ||
+    code === "ECONNREFUSED" ||
+    code === "ETIMEDOUT" ||
+    code === "ENETUNREACH" ||
+    code === "EHOSTUNREACH" ||
+    message.includes("object null is not iterable")
+  ) {
+    return true;
+  }
+
+  const nested = (err as { errors?: unknown }).errors;
+  return Array.isArray(nested) && nested.some(isDatabaseConnectionError);
+}
+
 /**
  * تعیین تنظیمات SSL.
  *
@@ -105,6 +137,12 @@ function resolveSsl(url: URL): PoolConfig["ssl"] {
 }
 
 function buildPoolConfig(): PoolConfig {
+  if (process.env.DATABASE_OFFLINE === "1") {
+    throw new DatabaseConnectionError(
+      "DATABASE_OFFLINE=1 است؛ اتصال دیتابیس در محیط توسعه عمداً غیرفعال شده."
+    );
+  }
+
   const raw = process.env.DATABASE_URL?.trim();
 
   if (!raw) {
@@ -155,13 +193,17 @@ function buildPoolConfig(): PoolConfig {
   const maxRaw = process.env.DATABASE_POOL_MAX?.trim();
   const maxParsed = maxRaw ? Number.parseInt(maxRaw, 10) : Number.NaN;
   const max = Number.isFinite(maxParsed) && maxParsed > 0 ? maxParsed : 10;
+  const timeoutRaw = process.env.DATABASE_CONNECTION_TIMEOUT_MS?.trim();
+  const timeoutParsed = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : Number.NaN;
+  const connectionTimeoutMillis =
+    Number.isFinite(timeoutParsed) && timeoutParsed > 0 ? timeoutParsed : 2_000;
 
   return {
     connectionString: url.toString(),
     ssl,
     max,
     idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
+    connectionTimeoutMillis,
     // نام برنامه در لاگ‌های Postgres — برای دیباگ روی Liara کمک می‌کند.
     application_name: "prompt-gallery",
   };
@@ -183,7 +225,11 @@ function createPool(): Pool {
  * در dev، Next ماژول‌ها را با هر تغییر فایل دوباره ارزیابی می‌کند. کش‌کردن روی
  * globalThis باعث می‌شود همان pool قبلی دوباره استفاده شود.
  */
-const globalForDb = globalThis as unknown as { __promptGalleryPool?: Pool };
+const globalForDb = globalThis as unknown as {
+  __promptGalleryPool?: Pool;
+  __promptGalleryUnavailableUntil?: number;
+  __promptGalleryLastConnectionError?: unknown;
+};
 
 export function getPool(): Pool {
   if (!globalForDb.__promptGalleryPool) {
@@ -208,8 +254,24 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
   text: string,
   params?: ReadonlyArray<unknown>
 ): Promise<T[]> {
-  const result = await getPool().query<T>(text, params ? Array.from(params) : undefined);
-  return result.rows;
+  const now = Date.now();
+  if (
+    globalForDb.__promptGalleryUnavailableUntil &&
+    globalForDb.__promptGalleryUnavailableUntil > now
+  ) {
+    throw globalForDb.__promptGalleryLastConnectionError;
+  }
+
+  try {
+    const result = await getPool().query<T>(text, params ? Array.from(params) : undefined);
+    return result.rows;
+  } catch (err) {
+    if (isDatabaseConnectionError(err)) {
+      globalForDb.__promptGalleryUnavailableUntil = Date.now() + 5_000;
+      globalForDb.__promptGalleryLastConnectionError = err;
+    }
+    throw err;
+  }
 }
 
 /**

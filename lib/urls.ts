@@ -8,7 +8,7 @@
  * تعریف می‌شود، پس اضافه‌کردنِ محورِ بعدی (سبک) هم فقط همین فایل را عوض می‌کند.
  *
  * پارامترهای خالی حذف می‌شوند تا آدرسِ «همه‌چیز» همان «/» بماند و نه
- * «/?category=&q=» — هم تمیزتر است و هم برای سئو یک آدرسِ کانونیک می‌سازد.
+ * «/?q=» — هم تمیزتر است و هم برای سئو یک آدرسِ کانونیک می‌سازد.
  */
 
 export type GalleryFilters = {
@@ -24,19 +24,123 @@ export type GalleryFilters = {
    * محتوای تکراری حساب می‌کند. حذفِ ۱ همین‌جا انجام می‌شود تا هیچ کامپوننتی
    * لازم نباشد یادش باشد.
    *
-   * ترتیبِ پارامترها هم عمداً ثابت است (category، بعد q، بعد page): دو آدرس با
-   * همان مقدارها ولی ترتیبِ متفاوت، برای گوگل دو آدرسِ جداگانه‌اند.
+   * ترتیبِ پارامترها هم عمداً ثابت است (q، بعد page): دو آدرس با همان مقدارها
+   * ولی ترتیبِ متفاوت، برای گوگل دو آدرسِ جداگانه‌اند.
    */
   page?: number | null;
 };
 
+/**
+ * دسته یک مسیر است و نه یک پارامتر: «/category/portrait» و نه
+ * «/?category=portrait».
+ *
+ * ── چرا عوض شد ──
+ * فارسی‌زبانی که «پرامپت پرتره» را جستجو می‌کند، باید به صفحه‌ی همان دسته
+ * برسد. «?category=» سه چیز را از ما می‌گرفت: گوگل پارامترِ کوئری را محورِ
+ * دسته‌بندی نمی‌شناسد (و در بدترین حالت همه‌ی نماها را تکراریِ «/» می‌گیرد)،
+ * آدرس برای آدم قابل‌خواندن نبود، و صفحه نمی‌توانست عنوان و توضیحِ خودش را
+ * داشته باشد چون مسیرِ جدایی نداشت.
+ *
+ * ── چه چیزی پارامتر ماند و چرا ──
+ * q و page. این دو *نما*ی همان مجموعه‌اند و نه مجموعه‌ی دیگری: «صفحه‌ی سومِ
+ * پرتره» همان دسته است با بریدگیِ متفاوت، پس مسیرِ سومی برایش ساختن یعنی
+ * تکثیرِ مسیر بی‌آنکه محتوای تازه‌ای اضافه شود. جستجو هم که عمداً noindex است.
+ *
+ * ⚠️ encodeURIComponent روی slugهای واقعی بی‌اثر است — قیدِ CHECK در
+ * db/schema.sql آن‌ها را به «^[a-z0-9]+(-[a-z0-9]+)*$» محدود کرده. هست تا اگر
+ * روزی آن قید شل شد (مثلاً slugِ فارسی)، آدرس‌سازی بی‌صدا نشکند.
+ */
 export function galleryHref(filters: GalleryFilters = {}): string {
+  const path = filters.category ? `/category/${encodeURIComponent(filters.category)}` : "/";
   const params = new URLSearchParams();
-  if (filters.category) params.set("category", filters.category);
   if (filters.q) params.set("q", filters.q);
   if (filters.page && filters.page > 1) params.set("page", String(Math.trunc(filters.page)));
   const qs = params.toString();
-  return qs.length > 0 ? `/?${qs}` : "/";
+  return qs.length > 0 ? `${path}?${qs}` : path;
+}
+
+/**
+ * الگوی slugِ معتبر — آینه‌ی قیدِ CHECK روی categories.slug در db/schema.sql.
+ *
+ * دو تعریف در دو جا خطرِ واگرایی دارد، ولی جایگزینش بدتر بود: بی این، هر
+ * «/category/<هرچیزی>» یک رفت‌وبرگشت به دیتابیس می‌شد. اگر آن قید عوض شد، این
+ * خط هم باید عوض شود — و برای همین اسمِ فایلِ اسکیما اینجا نوشته شده.
+ */
+const CATEGORY_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * سگمنتِ [slug] را به یک slugِ قابل‌اعتماد تبدیل می‌کند، یا null.
+ *
+ * برخلافِ parseImageId اینجا هیچ سقفِ طولی نیست و این آگاهانه است: طولِ slug در
+ * دیتابیس محدود نشده (TEXT)، پس هر سقفی که اینجا بگذاریم روزی که یک دسته‌ی
+ * بلندنام اضافه شود، صفحه‌اش را بی‌صدا ۴۰۴ می‌کند. مقایسه‌ی یک رشته‌ی بلند با
+ * ایندکسِ UNIQUE هم هزینه‌ی واقعی ندارد.
+ *
+ * lowercase و trim: مسیر می‌تواند «/category/Portrait» یا با فاصله‌ی
+ * کدشده («%20») بیاید — از لینکِ دستی یا کپیِ ناقص. اگر نتیجه با ورودیِ خام
+ * فرق کرد، صفحه به شکلِ کانونیک ریدایرکت می‌کند، دقیقاً مثل «/image/007».
+ *
+ * رقمِ فارسی هم لاتین می‌شود: slug می‌تواند رقم داشته باشد و کاربرِ فارسی‌زبانی
+ * که آدرس را دستی تایپ می‌کند «۳» می‌زند نه «3».
+ */
+export function parseCategorySlug(raw: string | string[] | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const slug = toLatinDigits(raw).trim().toLowerCase();
+  if (!CATEGORY_SLUG_PATTERN.test(slug)) return null;
+  return slug;
+}
+
+/**
+ * آدرسِ صفحه‌ی یک عکس.
+ *
+ * ⚠️ شناسه است و نه slugِ عنوان، و این یک تصمیمِ داده‌ای است نه سلیقه‌ای: ۲۹۰ از
+ * ۷۰۰ ردیف عنوانِ فارسیِ تکراری دارند («پرتره‌ی زنِ جوان» چندین بار)، پس slug
+ * برخورد می‌کرد و دو عکسِ متفاوت یک آدرس می‌گرفتند. اگر روزی آدرسِ خوانا لازم
+ * شد، شکلِ درستش «/image/<id>/<slug>» است که در آن slug تزئینی است و مسیر را
+ * از id می‌سازد — نه جایگزینیِ id با slug.
+ */
+export function imageHref(id: string): string {
+  return `/image/${id}`;
+}
+
+/**
+ * بزرگ‌ترین مقدارِ BIGINT در پستگرس، به شکلِ رشته.
+ *
+ * رشته و نه BigInt: مقایسه در پایین رشته‌ای انجام می‌شود، چون literalهای BigInt
+ * (مثلِ ۹…۸۰۷n) با target: ES2017 در tsconfig کامپایل نمی‌شوند و بالابردنِ target
+ * برای یک مقایسه، هزینه‌ی بی‌دلیلی روی کلِ خروجیِ باندل است.
+ */
+const MAX_BIGINT = "9223372036854775807";
+
+/**
+ * سگمنتِ [id] را به یک شناسه‌ی قابل‌اعتماد تبدیل می‌کند، یا null.
+ *
+ * سه کار می‌کند و هر سه لازم‌اند:
+ *
+ * ۱) رقمِ فارسی/عربی را لاتین می‌کند. کاربرِ فارسی‌زبان که آدرس را دستی تایپ
+ *    می‌کند همان رقمی را می‌زند که در صفحه دیده.
+ * ۲) اعتبارسنجیِ عددی. بی این، «/image/12a» به SQL می‌رسید و
+ *    '12a'::bigint خطای 22P02 می‌داد — یعنی یک آدرسِ غلط به‌جای ۴۰۴ می‌شد ۵۰۰.
+ *    سقفِ MAX_BIGINT هم همان‌قدر لازم است: ۱۹ رقمِ معتبر ولی بزرگ‌تر از سقف،
+ *    خطای سرریزِ ۲۲۰۰۳ می‌دهد که دقیقاً همان ۵۰۰ است با شماره‌ی دیگر.
+ * ۳) شکلِ کانونیک برمی‌گرداند (صفرهای ابتدایی حذف). چون «/image/007» و
+ *    «/image/7» یک محتوا با دو آدرس‌اند؛ صفحه با مقایسه‌ی خروجیِ این تابع با
+ *    ورودیِ خام، دومی را به اولی ریدایرکت می‌کند.
+ */
+export function parseImageId(raw: string | string[] | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const latin = toLatinDigits(raw).trim();
+  // سقفِ ۱۹ رقم: طولِ بیشینه‌ی BIGINT همین است، پس رقمِ بیستم قطعاً سرریز است.
+  if (!/^[0-9]{1,19}$/.test(latin)) return null;
+
+  const id = latin.replace(/^0+/, "");
+  // فقط صفر بود («0» یا «000»). در پستگرس عددِ معتبری است ولی هیچ ردیفی ندارد
+  // (sequence از ۱ شروع می‌شود)، پس همان‌جا ۴۰۴ بدهیم بهتر از یک کوئریِ بی‌جواب.
+  if (id === "") return null;
+  // مقایسه‌ی رشته‌ای اینجا دقیقاً درست است، چون هر دو طرف بی‌صفرِ ابتدایی و
+  // هم‌طول‌اند؛ در طولِ کمتر، عدد قطعاً کوچک‌تر است و مقایسه لازم نیست.
+  if (id.length === MAX_BIGINT.length && id > MAX_BIGINT) return null;
+  return id;
 }
 
 /**
@@ -72,9 +176,14 @@ function toLatinDigits(raw: string): string {
 }
 
 export function parsePage(raw: string | string[] | undefined): number {
-  const value = typeof raw === "string" ? Number(toLatinDigits(raw)) : Number.NaN;
-  if (!Number.isFinite(value)) return 1;
-  const page = Math.trunc(value);
-  if (page < 1) return 1;
+  if (typeof raw !== "string") return 1;
+
+  const value = toLatinDigits(raw).trim();
+  // فقط رقمِ کامل پذیرفته می‌شود. Number("2.7") و Number("1e9") هر دو عدد
+  // می‌سازند، اما هیچ‌کدام شماره‌صفحهٔ معتبرِ URL نیستند.
+  if (!/^[0-9]+$/.test(value)) return 1;
+
+  const page = Number(value);
+  if (!Number.isFinite(page) || page < 1) return 1;
   return Math.min(page, MAX_PAGE);
 }

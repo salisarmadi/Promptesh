@@ -1,7 +1,5 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { SiteHeader } from "./_components/site-header";
-import { SiteFooter } from "./_components/site-footer";
 
 /**
  * چیدمان ریشه.
@@ -13,6 +11,18 @@ import { SiteFooter } from "./_components/site-footer";
  * metadataBase از متغیر محیطی می‌آید تا با رفتن به دامنه‌ی واقعی فقط یک خط
  * در .env.local عوض شود و نه کد. اگر تنظیم نشده باشد، نکست آدرس‌های OG را
  * نسبی می‌گذارد که در dev بی‌مشکل است.
+ *
+ * ── چرا هدر و فوترِ سایت اینجا نیست ──
+ * قبلاً <SiteHeader/> و <SiteFooter/> همین‌جا بودند. با اضافه‌شدنِ پنل مدیریت
+ * منتقل شدند به app/(public)/layout.tsx، چون چیدمان‌های Next روی هم سوار
+ * می‌شوند و جایگزینِ هم نمی‌شوند: تا وقتی پوسته در ریشه بود، /admin هم هدر و
+ * فوترِ گالری را به ارث می‌برد و راهی برای حذفشان وجود نداشت.
+ *
+ * آدرس‌ها با این جابه‌جایی عوض نشدند؛ (public) یک گروهِ مسیر است و در URL
+ * دیده نمی‌شود.
+ *
+ * پس این فایل الان فقط سه چیز دارد: پوسته‌ی HTML، استایلِ سراسری، و متادیتای
+ * پیش‌فرض. هرچه اضافه کنی، پنل مدیریت هم آن را می‌گیرد.
  */
 
 const SITE_NAME = "پرامپتش";
@@ -41,16 +51,14 @@ export const metadata: Metadata = {
   robots: { index: true, follow: true },
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="fa" dir="rtl" className="antialiased">
       {/* min-h-dvh نه min-h-screen: روی موبایل، ۱۰۰vh ارتفاعِ نوار آدرس را
-          حساب نمی‌کند و ته صفحه زیر آن گم می‌شود. */}
-      <body className="flex min-h-dvh flex-col">
-        <SiteHeader />
-        <main className="flex-1">{children}</main>
-        <SiteFooter />
-      </body>
+          حساب نمی‌کند و ته صفحه زیر آن گم می‌شود.
+          ⚠️ flex-col و min-h-dvh اینجا لازم‌اند تا flex-1 روی <main> در
+          SiteChrome کار کند و فوتر در صفحه‌های کوتاه ته صفحه بنشیند. */}
+      <body className="flex min-h-dvh flex-col">{children}</body>
     </html>
   );
 }
