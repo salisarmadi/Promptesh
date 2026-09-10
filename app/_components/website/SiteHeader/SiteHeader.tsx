@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Sparkles, Instagram } from "@/app/_components/ui/Icons";
+import { Sparkles, Instagram, User } from "@/app/_components/ui/Icons";
 
 /**
  * هدرِ چسبانِ سایت — مطابق ماک.
@@ -39,17 +39,27 @@ export function SiteHeader() {
           </span>
         </Link>
 
-        {INSTAGRAM ? (
-          <a
-            href={INSTAGRAM}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="اینستاگرامِ پرامپتش"
-            className="flex size-[38px] items-center justify-center rounded-full bg-surface text-muted transition-colors hover:text-accent"
+        <div className="flex items-center gap-2">
+          <Link
+            href="/account"
+            aria-label="حساب کاربری"
+            className="flex h-[38px] items-center gap-1.5 rounded-pill bg-surface px-3 text-[12px] font-bold text-muted transition-colors hover:text-accent"
           >
-            <Instagram size={17} />
-          </a>
-        ) : null}
+            <User size={16} />
+            <span className="hidden sm:inline">حساب کاربری</span>
+          </Link>
+          {INSTAGRAM ? (
+            <a
+              href={INSTAGRAM}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="اینستاگرامِ پرامپتش"
+              className="flex size-[38px] items-center justify-center rounded-full bg-surface text-muted transition-colors hover:text-accent"
+            >
+              <Instagram size={17} />
+            </a>
+          ) : null}
+        </div>
       </div>
     </header>
   );

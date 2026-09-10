@@ -35,6 +35,7 @@ import { X } from "@/app/_components/ui/Icons";
 export function Modal({
   children,
   labelledBy,
+  headerAction,
 }: {
   children: React.ReactNode;
   /**
@@ -44,6 +45,8 @@ export function Modal({
    * چیزی اشاره دارد.
    */
   labelledBy: string;
+  /** کنشِ وابسته به همان تصویر، مثل ذخیره‌کردن در کتابخانه. */
+  headerAction?: React.ReactNode;
 }) {
   const router = useRouter();
   const reduced = useReducedMotion();
@@ -124,12 +127,13 @@ export function Modal({
               {/* دستگیره‌ی کشیدن + دکمه‌ی بستن */}
               <div className="relative flex items-center justify-center pb-2 pt-3">
                 <div className="h-[5px] w-9 rounded-full bg-line" aria-hidden />
+                {headerAction ? <div className="absolute left-3 top-2">{headerAction}</div> : null}
                 <button
                   ref={closeRef}
                   type="button"
                   onClick={close}
                   aria-label="بستن"
-                  className="absolute end-3 top-2 flex size-[30px] items-center justify-center rounded-full bg-surface text-muted transition-transform active:scale-95"
+                  className="absolute right-3 top-2 flex size-[30px] items-center justify-center rounded-full bg-surface text-muted transition-transform active:scale-95"
                 >
                   <X size={15} />
                 </button>

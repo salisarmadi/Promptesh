@@ -3,6 +3,9 @@ import Link from "next/link";
 import type { GalleryImage } from "@/lib/gallery";
 import { galleryHref } from "@/lib/urls";
 import { CopyButton } from "@/app/_components/ui/CopyButton";
+import { SaveImageButton } from "@/app/_components/ui/SaveImageButton";
+import { getCurrentUser } from "@/lib/users/session";
+import { isImageSaved } from "@/lib/users/queries";
 
 /**
  * بدنه‌ی جزئیاتِ یک عکس: تصویر + عنوان + دسته‌ها + تاریخ + پرامپتِ قابل‌کپی.
@@ -69,7 +72,7 @@ export function imageTitle(img: GalleryImage): string {
 
 export type ImageDetailVariant = "page" | "modal";
 
-export function ImageDetail({
+export async function ImageDetail({
   img,
   variant,
 }: {
@@ -82,6 +85,11 @@ export function ImageDetail({
   const Title = isPage ? "h1" : "h2";
   const title = imageTitle(img);
   const alt = img.title_fa ?? "تصویرِ ساخته‌شده با هوش مصنوعی";
+  // مودال دکمه‌ی قلب را در سربرگ خودش دارد. واکشیِ وضعیتِ ذخیره فقط برای
+  // صفحه‌ی کامل لازم است؛ این شرط یک رفت‌وبرگشتِ اضافی به دیتابیس را از هر
+  // بازشدنِ مودال حذف می‌کند.
+  const user = isPage ? await getCurrentUser() : null;
+  const saved = user ? await isImageSaved(user.id, img.id) : false;
 
   return (
     <div className="md:grid md:grid-cols-2">
@@ -125,9 +133,11 @@ export function ImageDetail({
           ))}
           {/* جای نشانِ مدل در ماک. model_used در کلِ محتوا NULL است؛ تاریخ
               داده‌ی واقعی است، پس همان اینجا می‌نشیند. */}
-          <span className="rounded-full bg-surface px-2.5 py-[5px] text-[10.5px] font-medium text-muted">
-            {dateFa.format(img.created_at)}
-          </span>
+          {isPage ? (
+            <span className="rounded-full bg-surface px-2.5 py-[5px] text-[10.5px] font-medium text-muted">
+              {dateFa.format(img.created_at)}
+            </span>
+          ) : null}
         </div>
 
         {img.prompt_text ? (
@@ -136,9 +146,11 @@ export function ImageDetail({
               <p className="text-[11px] font-bold text-faint">متنِ پرامپت</p>
               {/* طولِ پرامپت از ۳۹ تا ۴۰۶۱ کاراکتر است. این عدد می‌گوید کاربر با
                   چه چیزی طرف است، پیش از آنکه اسکرول کند. */}
-              <p className="text-[10px] text-faint">
-                {numFa.format(img.prompt_text.length)} کاراکتر
-              </p>
+              {isPage ? (
+                <p className="text-[10px] text-faint">
+                  {numFa.format(img.prompt_text.length)} کاراکتر
+                </p>
+              ) : null}
             </div>
 
             {/* dir="ltr" اجباری است: متنِ انگلیسی داخلِ صفحه‌ی RTL بدون این،
@@ -156,7 +168,10 @@ export function ImageDetail({
               </p>
             </div>
 
-            <CopyButton text={img.prompt_text} size="block" />
+            <div className="grid gap-2">
+              <CopyButton text={img.prompt_text} imageId={img.id} size="block" />
+              {isPage ? <SaveImageButton imageId={img.id} initiallySaved={saved} /> : null}
+            </div>
           </>
         ) : (
           <p className="text-sm text-faint">پرامپتی برای این تصویر ثبت نشده.</p>

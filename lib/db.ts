@@ -196,7 +196,7 @@ function buildPoolConfig(): PoolConfig {
   const timeoutRaw = process.env.DATABASE_CONNECTION_TIMEOUT_MS?.trim();
   const timeoutParsed = timeoutRaw ? Number.parseInt(timeoutRaw, 10) : Number.NaN;
   const connectionTimeoutMillis =
-    Number.isFinite(timeoutParsed) && timeoutParsed > 0 ? timeoutParsed : 2_000;
+    Number.isFinite(timeoutParsed) && timeoutParsed > 0 ? timeoutParsed : 10_000;
 
   return {
     connectionString: url.toString(),
@@ -227,13 +227,35 @@ function createPool(): Pool {
  */
 const globalForDb = globalThis as unknown as {
   __promptGalleryPool?: Pool;
+  __promptGalleryPoolConfigKey?: string;
   __promptGalleryUnavailableUntil?: number;
   __promptGalleryLastConnectionError?: unknown;
 };
 
 export function getPool(): Pool {
-  if (!globalForDb.__promptGalleryPool) {
+  // Next در توسعه .env.local را بدون کشتنِ پراسس دوباره می‌خواند، اما globalThis
+  // عمداً بین hot reloadها باقی می‌ماند. اگر تنظیم اتصال عوض شد، pool قدیمی با
+  // timeout قبلی نباید تا ری‌استارت دستی زنده بماند.
+  const configKey = [
+    process.env.DATABASE_URL ?? "",
+    process.env.DATABASE_POOL_MAX ?? "",
+    process.env.DATABASE_CONNECTION_TIMEOUT_MS ?? "",
+    process.env.DATABASE_OFFLINE ?? "",
+  ].join("\u0000");
+  const mustReplaceInDevelopment =
+    process.env.NODE_ENV === "development" &&
+    globalForDb.__promptGalleryPool !== undefined &&
+    globalForDb.__promptGalleryPoolConfigKey !== configKey;
+
+  if (!globalForDb.__promptGalleryPool || mustReplaceInDevelopment) {
+    const previousPool = globalForDb.__promptGalleryPool;
     globalForDb.__promptGalleryPool = createPool();
+    globalForDb.__promptGalleryPoolConfigKey = configKey;
+    // پایان‌دادنِ pool قبلی asynchronous است؛ pool تازه از همین درخواست آماده
+    // استفاده است و خطای cleanup نباید مسیرِ نمایش گالری را خراب کند.
+    void previousPool?.end().catch((error: unknown) => {
+      console.error("[db] بستن pool قدیمی ناموفق بود:", error);
+    });
   }
   return globalForDb.__promptGalleryPool;
 }
@@ -304,6 +326,7 @@ export async function closePool(): Promise<void> {
   const pool = globalForDb.__promptGalleryPool;
   if (pool) {
     globalForDb.__promptGalleryPool = undefined;
+    globalForDb.__promptGalleryPoolConfigKey = undefined;
     await pool.end();
   }
 }

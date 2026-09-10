@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+@layer components {
+  .account-input {
+    @apply w-full rounded-field border border-line bg-canvas px-3.5 py-3 text-sm text-ink outline-none transition-shadow placeholder:text-faint focus:shadow-field-focus disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .account-button {
+    @apply inline-flex min-h-12 items-center justify-center rounded-pill bg-accent px-5 py-3 text-sm font-bold text-white shadow-cta transition-colors hover:bg-accent-strong disabled:cursor-not-allowed disabled:opacity-60;
+  }
+}
+
 /* ===========================================================================
    پرامپتش — توکن‌های طراحی
    ===========================================================================

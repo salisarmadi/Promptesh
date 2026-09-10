@@ -32,9 +32,12 @@ const SHADOW = {
 
 export function CopyButton({
   text,
+  imageId,
   size = "sm",
 }: {
   text: string;
+  /** اگر کاربر وارد باشد، کپی در تاریخچهٔ شخصی‌اش ثبت می‌شود. */
+  imageId?: string;
   /** sm برای ردیف‌های فشرده، block برای کنشِ اصلیِ مودال. */
   size?: "sm" | "block";
 }) {
@@ -59,13 +62,21 @@ export function CopyButton({
         document.execCommand("copy");
         document.body.removeChild(ta);
       }
+      if (imageId) {
+        // ثبت تاریخچه نباید موفقیتِ کنش اصلی (کپی‌شدن) را وابسته به شبکه کند.
+        void fetch("/api/account/copies", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ imageId }),
+        });
+      }
       setCopied(true);
       window.setTimeout(() => setCopied(false), FEEDBACK_MS);
     } catch {
       // اگر کپی نشد بی‌سر‌و‌صدا بگذر: متن روی صفحه هست و کاربر می‌تواند دستی
       // انتخاب کند. نمایشِ خطا اینجا فقط سر‌و‌صدا است، چون راهِ‌حلی ندارد.
     }
-  }, [text]);
+  }, [text, imageId]);
 
   const isBlock = size === "block";
 

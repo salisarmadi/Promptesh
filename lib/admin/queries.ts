@@ -165,6 +165,28 @@ export async function listPendingPrompts(limit = 30): Promise<PendingPromptRow[]
   );
 }
 
+export type UserSubmissionReviewRow = {
+  id: string;
+  image_url: string;
+  prompt_text: string;
+  model_used: string | null;
+  category_id: string | null;
+  display_name: string;
+  created_at: Date;
+};
+
+/** ارسال‌های کاربران جدا از ورودی n8n هستند تا مالک و مسیر انتشارشان گم نشود. */
+export async function listUserSubmissionsForReview(limit = 30): Promise<UserSubmissionReviewRow[]> {
+  return query<UserSubmissionReviewRow>(
+    `SELECT s.id::text, s.image_url, s.prompt_text, s.model_used, s.category_id::text,
+            u.display_name, s.created_at
+       FROM user_submissions s JOIN user_accounts u ON u.id = s.user_id
+      WHERE s.status = 'pending_review'
+      ORDER BY s.created_at DESC, s.id DESC LIMIT $1`,
+    [limit]
+  );
+}
+
 export async function listModelStats(limit = 8): Promise<ModelStatsRow[]> {
   return query<ModelStatsRow>(
     `SELECT coalesce(nullif(btrim(model_used), ''), 'نامشخص') AS label,

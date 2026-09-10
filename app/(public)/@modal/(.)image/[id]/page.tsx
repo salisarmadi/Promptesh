@@ -4,6 +4,9 @@ import { getGalleryImage } from "@/lib/gallery";
 import { parseImageId } from "@/lib/urls";
 import { Modal } from "@/app/_components/website/Modal";
 import { ImageDetail, IMAGE_TITLE_ID } from "@/app/_components/website/ImageDetail";
+import { SaveImageButton } from "@/app/_components/ui/SaveImageButton";
+import { getCurrentUser } from "@/lib/users/session";
+import { isImageSaved } from "@/lib/users/queries";
 
 /**
  * مسیرِ رهگیرِ مودال.
@@ -35,7 +38,7 @@ import { ImageDetail, IMAGE_TITLE_ID } from "@/app/_components/website/ImageDeta
  */
 export default function InterceptedImagePage({ params }: { params: Promise<{ id: string }> }) {
   return (
-    <Modal labelledBy={IMAGE_TITLE_ID}>
+    <Modal labelledBy={IMAGE_TITLE_ID} headerAction={<Suspense fallback={<div className="size-[30px]" />}><ModalSaveAction params={params} /></Suspense>}>
       <Suspense fallback={<DetailSkeleton />}>
         {/* params عمداً همین‌جا await نمی‌شود: خواندنش این کامپوننت را منتظر
             می‌کرد و پوسته‌ی مودال هم با آن عقب می‌افتاد. promise پاس داده می‌شود
@@ -44,6 +47,13 @@ export default function InterceptedImagePage({ params }: { params: Promise<{ id:
       </Suspense>
     </Modal>
   );
+}
+
+async function ModalSaveAction({ params }: { params: Promise<{ id: string }> }) {
+  const id = parseImageId((await params).id);
+  if (!id) return null;
+  const user = await getCurrentUser();
+  return <SaveImageButton imageId={id} initiallySaved={user ? await isImageSaved(user.id, id) : false} variant="icon" />;
 }
 
 async function ModalBody({ params }: { params: Promise<{ id: string }> }) {
