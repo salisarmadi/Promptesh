@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import { Lock, ArrowLeft } from "@/app/_components/ui/Icons";
-import { isAdminConfigured } from "@/lib/admin/session";
+import { adminConfigurationIssue, isAdminConfigured } from "@/lib/admin/session";
 import { isAdminAuthenticated, safeNextPath } from "@/lib/admin/auth";
 import { LoginForm } from "@/app/_components/admin/LoginForm";
 
@@ -32,7 +33,7 @@ export const metadata: Metadata = {
 };
 
 /** بلوکِ راهنمای راه‌اندازی. تنها وقتی دیده می‌شود که env تنظیم نشده باشد. */
-function SetupGuide() {
+function SetupGuide({ issue }: { issue: string | null }) {
   return (
     <div className="flex flex-col gap-3 rounded-plate bg-surface px-4 py-4">
       <p className="text-[11.5px] font-semibold text-ink">پنل هنوز راه‌اندازی نشده</p>
@@ -40,6 +41,7 @@ function SetupGuide() {
         رمزِ مدیر و کلیدِ امضای نشست تنظیم نشده‌اند. این دستور را در ریشه‌ی پروژه اجرا کن و دو
         خطی که چاپ می‌کند را در <span dir="ltr" className="font-mono">.env.local</span> بگذار:
       </p>
+      {issue ? <p className="rounded-field border border-alert/20 bg-alert-wash px-3 py-2 text-[11px] leading-relaxed text-alert">{issue}</p> : null}
       <code
         dir="ltr"
         className="rounded-plate bg-canvas px-3 py-2.5 font-mono text-[11.5px] text-ink-code shadow-field"
@@ -58,6 +60,9 @@ export default async function AdminLoginPage({
 }: {
   searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }) {
+  // مقدارهای محرمانه‌ی پنل از محیطِ runtime نتلیفای خوانده می‌شوند، نه از
+  // HTML ساخته‌شده در زمان build. این مرز برای تغییر env و redeploy ضروری است.
+  await connection();
   const params = await searchParams;
   const rawNext = typeof params.next === "string" ? params.next : null;
   const nextPath = safeNextPath(rawNext);
@@ -67,6 +72,7 @@ export default async function AdminLoginPage({
   }
 
   const configured = isAdminConfigured();
+  const configurationIssue = configured ? null : adminConfigurationIssue();
 
   return (
     <main className="flex flex-1 items-center justify-center px-4 py-16 sm:px-6">
@@ -87,7 +93,7 @@ export default async function AdminLoginPage({
             </div>
           </div>
 
-          {configured ? <LoginForm nextPath={nextPath} /> : <SetupGuide />}
+          {configured ? <LoginForm nextPath={nextPath} /> : <SetupGuide issue={configurationIssue} />}
         </div>
 
         {/* راهِ برگشت به سایت. کسی که اشتباهی سرِ این آدرس آمده نباید در بن‌بست بماند. */}

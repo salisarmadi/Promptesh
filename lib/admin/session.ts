@@ -146,6 +146,20 @@ export function isAdminConfigured(): boolean {
   }
 }
 
+/**
+ * متنِ راهنمای قابل‌نمایش برای نصب. هیچ مقدار محرمانه‌ای برنمی‌گرداند؛ فقط
+ * نبودن، قالبِ نادرست یا کوتاهیِ کلید را توضیح می‌دهد.
+ */
+export function adminConfigurationIssue(): string | null {
+  try {
+    readPasswordHash();
+    readSessionSecret();
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : "تنظیمات پنل خوانده نشد.";
+  }
+}
+
 /** همان بررسی، ولی با خطای توضیح‌دار. برای جایی که می‌خواهیم پیام را نشان دهیم. */
 export function assertAdminConfigured(): void {
   readPasswordHash();
